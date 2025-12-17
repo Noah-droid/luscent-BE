@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     'users',
     'projects',
     'collection',
+    'test_cases',
 ]
 
 # Custom user model
