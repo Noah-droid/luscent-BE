@@ -11,6 +11,9 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 from pathlib import Path
+from decouple import config
+
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -81,7 +84,7 @@ MIDDLEWARE = [
 
 # CORS settings
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",  # Next.js default
+    "http://localhost:3000",  
     "http://127.0.0.1:3000",
 ]
 CORS_ALLOW_CREDENTIALS = True
@@ -179,5 +182,17 @@ SIMPLE_JWT = {
 }
 
 
+LLM_API_KEY = config('LLM_API_KEY', default=None)
+LLM_BASE_URL = config('LLM_BASE_URL', default="https://api.openai.com/v1")
+LLM_PROVIDER = config('LLM_PROVIDER', default="openai") # openai or gemini
+GEMINI_API_KEY = config('GEMINI_API_KEY', default=None)
+
+# Celery Configuration
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://localhost:6379/0')
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://localhost:6379/1')
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE
 
 
