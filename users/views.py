@@ -11,6 +11,8 @@ from .serializers import (
     LoginSerializer,
     APITokenSerializer
 )
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 
 
 class RegisterView(generics.CreateAPIView):
@@ -19,6 +21,28 @@ class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
     
+    @swagger_auto_schema(
+        operation_description="Register a new user",
+        responses={
+            201: openapi.Response(
+                description="User registered successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'user': openapi.Schema(type=openapi.TYPE_OBJECT, properties={
+                            'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                            'email': openapi.Schema(type=openapi.TYPE_STRING),
+                            'username': openapi.Schema(type=openapi.TYPE_STRING),
+                        }),
+                        'api_token': openapi.Schema(type=openapi.TYPE_STRING),
+                        'access_token': openapi.Schema(type=openapi.TYPE_STRING),
+                        'refresh_token': openapi.Schema(type=openapi.TYPE_STRING),
+                        'message': openapi.Schema(type=openapi.TYPE_STRING),
+                    }
+                )
+            )
+        }
+    )
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -43,6 +67,30 @@ class LoginView(APIView):
     """User login endpoint"""
     permission_classes = [permissions.AllowAny]
     
+    @swagger_auto_schema(
+        operation_description="Login user and get tokens",
+        request_body=LoginSerializer,
+        responses={
+            200: openapi.Response(
+                description="Login successful",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'message': openapi.Schema(type=openapi.TYPE_STRING),
+                        'user': openapi.Schema(type=openapi.TYPE_OBJECT, properties={
+                            'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                            'email': openapi.Schema(type=openapi.TYPE_STRING),
+                            'username': openapi.Schema(type=openapi.TYPE_STRING),
+                        }),
+                        'api_token': openapi.Schema(type=openapi.TYPE_STRING),
+                        'access_token': openapi.Schema(type=openapi.TYPE_STRING),
+                        'refresh_token': openapi.Schema(type=openapi.TYPE_STRING),
+                    }
+                )
+            ),
+            400: "Invalid credentials"
+        }
+    )
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -93,6 +141,30 @@ class RefreshTokenView(APIView):
     """Refresh JWT access token using refresh token"""
     permission_classes = [permissions.AllowAny]
     
+    @swagger_auto_schema(
+        operation_description="Refresh access token",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['refresh_token'],
+            properties={
+                'refresh_token': openapi.Schema(type=openapi.TYPE_STRING)
+            }
+        ),
+        responses={
+            200: openapi.Response(
+                description="Token refreshed",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'access_token': openapi.Schema(type=openapi.TYPE_STRING),
+                        'message': openapi.Schema(type=openapi.TYPE_STRING),
+                    }
+                )
+            ),
+            400: "Refresh token required",
+            401: "Invalid or expired refresh token"
+        }
+    )
     def post(self, request):
         refresh_token = request.data.get('refresh_token')
         
@@ -119,6 +191,28 @@ class LogoutView(APIView):
     """Logout and blacklist refresh token"""
     permission_classes = [permissions.IsAuthenticated]
     
+    @swagger_auto_schema(
+        operation_description="Logout user (blacklist refresh token)",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['refresh_token'],
+            properties={
+                'refresh_token': openapi.Schema(type=openapi.TYPE_STRING)
+            }
+        ),
+        responses={
+            200: openapi.Response(
+                description="Logged out successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'message': openapi.Schema(type=openapi.TYPE_STRING),
+                    }
+                )
+            ),
+            400: "Invalid token"
+        }
+    )
     def post(self, request):
         try:
             refresh_token = request.data.get('refresh_token')
