@@ -1,6 +1,3 @@
-"""
-Cloudinary storage service for managing test artifacts.
-"""
 import os
 import logging
 import cloudinary

@@ -1,6 +1,4 @@
-"""
-Security utilities for validating user-provided URLs and preventing SSRF attacks.
-"""
+
 import ipaddress
 import socket
 from urllib.parse import urlparse
