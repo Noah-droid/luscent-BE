@@ -1,0 +1,312 @@
+import requests
+import json
+import os
+import logging
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
+
+class AITestGenerator:
+    def __init__(self):
+        # Configurable via settings
+        self.provider = getattr(settings, 'LLM_PROVIDER', 'openai').lower()
+        self.openai_api_key = getattr(settings, 'LLM_API_KEY', None)
+        self.openai_base_url = getattr(settings, 'LLM_BASE_URL', "https://api.openai.com/v1")
+        self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)
+        
+        self.model = "gpt-4o-mini" if self.provider == "openai" else "gemini-2.5-flash"
+        self.max_tokens = 8192 
+        self.temperature = 0.7
+
+    def generate_tests(self, collection_item, runner_type="http", category="functional", layer="backend", scenarios=None):
+        """
+        Generate test cases for a given Collection (endpoint) object.
+        Returns a list of dicts suitable for creating TestCase objects.
+        """
+        api_key = self.openai_api_key if self.provider == "openai" else self.gemini_api_key
+        
+        if not api_key or api_key == "PLACEHOLDER":
+            logger.warning(f"No API key found for provider {self.provider}. Skipping AI generation.")
+            return []
+
+        prompt = self._construct_prompt(collection_item, runner_type, category, layer, scenarios)
+        
+        try:
+            response = self._call_llm(prompt)
+            test_cases_data = self._parse_response(response)
+            return test_cases_data
+        except Exception as e:
+            logger.error(f"AI Generation failed ({self.provider}): {e}")
+            return []
+
+    def _construct_prompt(self, item, runner_type, category, layer, scenarios):
+        # Build context about the endpoint
+        context = {
+            "method": item.method,
+            "url": item.url,
+            "description": item.description,
+            "request_body_schema": item.request_body,
+            "query_params": item.query_params,
+        }
+        
+        # Inject Project Variables if available
+        project_vars = {}
+        if hasattr(item.project, 'environment_variables') and item.project.environment_variables:
+             project_vars = item.project.environment_variables
+
+        # Format requested scenarios for the prompt
+        scenario_instruction = ""
+        if scenarios and isinstance(scenarios, list):
+            scenario_list = ", ".join(scenarios)
+            scenario_instruction = f"""
+            STRICT REQUIREMENT: You must ONLY generate test cases for the following scenarios:
+            {scenario_list}
+            Do NOT generate any other types of tests (e.g. if 'SECURITY' is not listed, do not generate SQL injection tests).
+            """
+        else:
+            scenario_instruction = "Generate 3 diverse test cases covering happy paths and common error validation."
+
+        instructions = f"""
+        You are an expert QA Automation Engineer. 
+        Generate test cases for the following API endpoint/feature.
+
+        Context:
+        - Type: {category} Testing
+        - Layer: {layer}
+        - Runner: {runner_type}
+        
+        {scenario_instruction}
+        
+        Project Environment Variables (Use these values for test data where applicable):
+        {json.dumps(project_vars, indent=2)}
+
+        Endpoint Details:
+        {json.dumps(context, indent=2)}
+        """
+
+        if runner_type == "browser":
+            instructions += """
+        For 'browser' tests, you MUST generate a valid Python Playwright script in the 'test_script' field.
+        The script should visit the page (if applicable) or perform the action.
+        
+        CRITICAL: The runner provides a path in os.environ['SCREENSHOT_PATH']. 
+        If the test fails OR if you want to capture state, you MUST save a screenshot to this path using:
+        `page.screenshot(path=os.environ['SCREENSHOT_PATH'])`
+        
+        Example format item:
+        {
+            "name": "Browser Login",
+            "description": "...",
+            "runner_type": "browser",
+            "test_script": "import os\npage.goto('url')\npage.fill('#user', 'test')\nif 'Error' in page.content():\n    page.screenshot(path=os.environ['SCREENSHOT_PATH'])\n    raise Exception('Login failed')",
+            "priority": "high"
+        }
+        """
+        elif runner_type == "load":
+            instructions += """
+        For 'load' tests, generate a Python Locust task in 'test_script' field.
+        """
+        else:
+            # Default HTTP
+            instructions += """
+        For 'http' tests, focus on 'headers', 'query_params', 'body' and 'assertions'.
+        """
+
+        instructions += """
+        Output strictly valid JSON list of objects. No markdown. No comments.
+        Use double quotes for all keys and strings.
+        Format:
+        [
+        {
+            "name": "Test Name",
+            "description": "What this tests",
+            "runner_type": "{runner_type}",
+            "category": "{category}",
+            "layer": "{layer}",
+            "priority": "high/medium/low",
+            "headers": {},
+            "query_params": {},
+            "body": {},
+            "expected_status": 200,
+            "assertions": [
+            {"type": "status", "value": 200},
+            {"type": "json_path", "field": "$.id", "operator": "exists"}
+            ],
+            "tags": ["SCENARIO:HAPPY_PATH"],
+            "test_script": null,
+            "use_visual_ai": false
+        }
+        ]
+        """
+        return instructions
+
+    def _call_llm(self, prompt):
+        if self.provider == "gemini":
+            return self._call_gemini(prompt)
+        else:
+            return self._call_openai(prompt)
+
+    def _call_openai(self, prompt):
+        headers = {
+            "Authorization": f"Bearer {self.openai_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": "You are a helpful QA assistant that outputs only JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": self.temperature
+        }
+
+        resp = requests.post(f"{self.openai_base_url}/chat/completions", json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+    def _call_gemini(self, prompt):
+        # Native Gemini REST API
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.gemini_api_key}"
+        
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": self.max_tokens,
+                "response_mime_type": "application/json"
+            }
+        }
+
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        # Extract content from Gemini response
+        try:
+            content = data["candidates"][0]["content"]["parts"][0]["text"]
+            return content
+        except (KeyError, IndexError) as e:
+            logger.error(f"Failed to parse Gemini response: {data}")
+            raise Exception("Invalid Gemini response format")
+
+    def _parse_response(self, content):
+        # AI might wrap in ```json ... ```
+        clean_content = content.replace("```json", "").replace("```", "").strip()
+        
+        try:
+            return json.loads(clean_content)
+        except json.JSONDecodeError:
+            # cleanup for errors
+            # 1. Trailing commas
+            # 2. Single quotes instead of double (risky but common)
+            try:
+                
+                import re
+                clean_content = re.sub(r',\s*([\]}])', r'\1', clean_content)
+                return json.loads(clean_content)
+            except:
+                logger.error(f"Failed to parse JSON content: {clean_content}")
+                raise
+
+    def analyze_screenshot(self, image_path):
+        """
+        Analyzes a screenshot for visual defects using Vision AI.
+        Returns a string description of findings.
+        """
+        import base64
+        
+        if not os.path.exists(image_path):
+            return "Error: Screenshot not found."
+            
+        with open(image_path, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+
+        prompt = """
+        You are a QA Visual Inspector. Analyze this screenshot of a web application.
+        Look for:
+        1. Visual Glitches (broken layout, overlapping text)
+        2. Error Messages (toasts, red alerts, stack traces)
+        3. Broken Images
+        
+        If it looks correct, reply exactly: "NO_DEFECTS".
+        If there are issues, describe them briefly.
+        """
+
+        try:
+            if self.provider == "gemini":
+                return self._call_gemini_vision(prompt, encoded_string)
+            else:
+                return self._call_openai_vision(prompt, encoded_string)
+        except Exception as e:
+            logger.error(f"Visual Analysis failed: {e}")
+            return f"Visual Analysis Error: {e}"
+
+    def _call_openai_vision(self, prompt, base64_image):
+        if self.model == "gpt-3.5-turbo":
+             # Fallback if using older model setting
+             self.model = "gpt-4o-mini"
+             
+        headers = {
+            "Authorization": f"Bearer {self.openai_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user", 
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 300
+        }
+        
+        resp = requests.post(f"{self.openai_base_url}/chat/completions", json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+    def _call_gemini_vision(self, prompt, base64_image):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.gemini_api_key}"
+        
+        headers = {"Content-Type": "application/json"}
+        
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/png",
+                            "data": base64_image
+                        }
+                    }
+                ]
+            }]
+        }
+
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        
+        try:
+            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        except:
+            return "Error parsing Gemini vision response"
+
+
