@@ -1,0 +1,68 @@
+from django.db import models
+from projects.models import Project
+
+
+class Collection(models.Model):
+    METHOD_CHOICES = [
+        ("GET", "GET"),
+        ("POST", "POST"),
+        ("PUT", "PUT"),
+        ("PATCH", "PATCH"),
+        ("DELETE", "DELETE"),
+    ]
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="endpoints")
+    name = models.CharField(max_length=200)  
+    method = models.CharField(max_length=10, choices=METHOD_CHOICES)
+    url = models.CharField(max_length=500) # Full URL
+    
+    # Auth
+    AUTH_CHOICES = [
+        ("none", "No Auth"),
+        ("api_key", "API Key"),
+        ("bearer", "Bearer Token"),
+        ("basic", "Basic Auth"),
+    ]
+    auth_type = models.CharField(max_length=20, choices=AUTH_CHOICES, default="none")
+    auth_value = models.TextField(blank=True, null=True) 
+    query_params = models.JSONField(default=dict, blank=True)
+    headers = models.JSONField(default=dict, blank=True)
+    request_body = models.JSONField(default=dict, blank=True)
+    description = models.TextField(blank=True, null=True)
+    source = models.CharField(max_length=20, choices=[
+        ("manual", "Manual"),
+        ("swagger", "Swagger"),
+        ("postman", "Postman"),
+        ("crawler", "Crawler"),
+    ], default="manual")
+
+
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("project", "method", "url")
+
+    def __str__(self):
+        return f"{self.method} {self.url}"
+    
+    def clean(self):
+        """Validate URL security before saving."""
+        from django.core.exceptions import ValidationError
+        from test_cases.security import validate_url_security
+        from django.conf import settings
+        
+        # Validate URL security
+        allow_localhost = getattr(settings, 'DEBUG', False)
+        is_valid, error_message = validate_url_security(self.url, allow_localhost=allow_localhost)
+        
+        if not is_valid:
+            raise ValidationError({
+                'url': f'Security validation failed: {error_message}'
+            })
+    
+    def save(self, *args, **kwargs):
+        """Override save to ensure validation runs."""
+        self.full_clean()
+        super().save(*args, **kwargs)
+
