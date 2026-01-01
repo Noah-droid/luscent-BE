@@ -48,6 +48,17 @@ class RegisterView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
         
+        # Generate OTP (6 digits)
+        import secrets
+        otp = f"{secrets.randbelow(1_000_000):06d}"
+        user.verification_token = otp
+        user.is_verified = False
+        user.save()
+        
+        # Send Email
+        from notifications.services import send_verification_email
+        send_verification_email(user, otp)
+        
         # Create API token for CLI usage
         api_token = APIToken.objects.create(user=user, name="Default Token")
         
@@ -59,8 +70,85 @@ class RegisterView(generics.CreateAPIView):
             'api_token': api_token.token,  # For CLI
             'access_token': str(refresh.access_token),  
             'refresh_token': str(refresh),  
-            'message': 'User registered successfully'
+            'message': 'User registered successfully. Please check your email for the verification code.'
         }, status=status.HTTP_201_CREATED)
+
+
+class VerifyEmailView(APIView):
+    """Verify user email via OTP"""
+    permission_classes = [permissions.AllowAny]
+    
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['email', 'otp'],
+            properties={
+                'email': openapi.Schema(type=openapi.TYPE_STRING),
+                'otp': openapi.Schema(type=openapi.TYPE_STRING),
+            }
+        )
+    )
+    def post(self, request):
+        email = request.data.get('email')
+        otp = request.data.get('otp')
+        
+        if not email or not otp:
+            return Response({'error': 'Email and OTP required'}, status=400)
+            
+        try:
+            user = User.objects.get(email=email)
+            
+            if user.is_verified:
+                return Response({'message': 'Already verified'}, status=200)
+            
+            if user.verification_token != otp:
+                return Response({'error': 'Invalid OTP'}, status=400)
+                
+            user.is_verified = True
+            user.verification_token = None  # Clear OTP after use
+            user.save()
+            
+            return Response({'message': 'Email verified successfully'}, status=200)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=404)
+
+
+class ResendOTPView(APIView):
+    """Resend OTP to user"""
+    permission_classes = [permissions.AllowAny]
+    
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['email'],
+            properties={
+                'email': openapi.Schema(type=openapi.TYPE_STRING)
+            }
+        )
+    )
+    def post(self, request):
+        email = request.data.get('email')
+        if not email:
+            return Response({'error': 'Email required'}, status=400)
+            
+        try:
+            user = User.objects.get(email=email)
+            if user.is_verified:
+                return Response({'message': 'Already verified'}, status=200)
+                
+            # Generate new OTP
+            import secrets
+            otp = f"{secrets.randbelow(1_000_000):06d}"
+            user.verification_token = otp
+            user.save()
+            
+            # Send Email
+            from notifications.services import send_verification_email
+            send_verification_email(user, otp)
+            
+            return Response({'message': 'OTP resent successfully'}, status=200)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=404)
 
 
 class LoginView(APIView):
@@ -95,6 +183,13 @@ class LoginView(APIView):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data['user']
+        
+        # Check verification
+        if not user.is_verified:
+            return Response(
+                {'error': 'Email not verified. Please check your inbox.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
         
         # Get or create API token for CLI usage
         api_token, created = APIToken.objects.get_or_create(
