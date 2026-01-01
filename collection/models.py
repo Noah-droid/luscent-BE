@@ -1,6 +1,8 @@
 from django.db import models
 from projects.models import Project
 
+from encrypted_fields.fields import EncryptedCharField, EncryptedJSONField
+
 
 class Collection(models.Model):
     METHOD_CHOICES = [
@@ -24,10 +26,10 @@ class Collection(models.Model):
         ("basic", "Basic Auth"),
     ]
     auth_type = models.CharField(max_length=20, choices=AUTH_CHOICES, default="none")
-    auth_value = models.TextField(blank=True, null=True) 
-    query_params = models.JSONField(default=dict, blank=True)
-    headers = models.JSONField(default=dict, blank=True)
-    request_body = models.JSONField(default=dict, blank=True)
+    auth_value = EncryptedCharField(max_length=500, blank=True, null=True) 
+    query_params = EncryptedJSONField(default=dict, blank=True)
+    headers = EncryptedJSONField(default=dict, blank=True)
+    request_body = EncryptedJSONField(default=dict, blank=True)
     description = models.TextField(blank=True, null=True)
     source = models.CharField(max_length=20, choices=[
         ("manual", "Manual"),
