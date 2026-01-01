@@ -34,6 +34,11 @@ class RunnerService:
                 raise ValueError(f"Unknown runner type: {runner_type}")
                 
             test_run.save()
+            
+        
+            from notifications.services import send_test_run_report
+            send_test_run_report(test_run)
+            
             return test_run
             
         except Exception as e:
@@ -41,6 +46,11 @@ class RunnerService:
             test_run.status = "error"
             test_run.error_message = str(e)
             test_run.save()
+            
+
+            from notifications.services import send_test_run_report
+            send_test_run_report(test_run)
+            
             return test_run
 
 
