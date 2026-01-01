@@ -16,3 +16,4 @@ drf-yasg>=1.21.7
 requests>=2.31.0
 cloudinary>=1.36.0
 django-ratelimit>=4.1.0
+resend>=0.6.0
