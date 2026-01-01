@@ -206,5 +206,10 @@ CLOUDINARY_API_SECRET = config('CLOUDINARY_API_SECRET', default='')
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
+
 SALT_KEY = config('SALT_KEY')
 
+# Email Configuration
+RESEND_API_KEY = config('RESEND_API_KEY', default='')
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL')
+FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
