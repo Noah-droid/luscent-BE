@@ -47,7 +47,8 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'drf_yasg',  
-    
+
+
     # Local apps
     'users',
     'projects',
@@ -203,3 +204,7 @@ CLOUDINARY_API_SECRET = config('CLOUDINARY_API_SECRET', default='')
 # https://docs.djangoproject.com/en/6.0/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+SALT_KEY = config('SALT_KEY')
+
