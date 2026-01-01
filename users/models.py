@@ -13,6 +13,10 @@ class User(AbstractUser):
     test_runs_count = models.IntegerField(default=0)
     test_runs_limit = models.IntegerField(default=100)  # Free tier limit
     
+    # Verification
+    is_verified = models.BooleanField(default=False)
+    verification_token = models.CharField(max_length=100, blank=True, null=True)
+    
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['username']
     
