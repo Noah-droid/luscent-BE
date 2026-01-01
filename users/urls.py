@@ -5,13 +5,17 @@ from .views import (
     CurrentUserView,
     UserTokensView,
     RefreshTokenView,
-    LogoutView
+    LogoutView,
+    VerifyEmailView,
+    ResendOTPView
 )
 
 app_name = 'users'
 
 urlpatterns = [
     path('register/', RegisterView.as_view(), name='register'),
+    path('verify-email/', VerifyEmailView.as_view(), name='verify-email'),
+    path('resend-otp/', ResendOTPView.as_view(), name='resend-otp'),
     path('login/', LoginView.as_view(), name='login'),
     path('logout/', LogoutView.as_view(), name='logout'),
     path('me/', CurrentUserView.as_view(), name='current-user'),
