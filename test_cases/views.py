@@ -10,6 +10,8 @@ from .models import TestCase, TestRun
 from .serializers import TestCaseSerializer, TestRunSerializer
 from .ai_generator import AITestGenerator
 from .runner_service import RunnerService
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 try:
     from .tasks import run_test_case_task
     HAS_CELERY = True
@@ -68,6 +70,25 @@ class DraftTestPlanView(APIView):
     """
     permission_classes = [permissions.IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_description="Generate a draft test plan using AI",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['collection'],
+            properties={
+                'collection': openapi.Schema(type=openapi.TYPE_INTEGER),
+                'runner_type': openapi.Schema(type=openapi.TYPE_STRING, enum=['http', 'load', 'browser']),
+                'category': openapi.Schema(type=openapi.TYPE_STRING, enum=['functional', 'performance', 'security']),
+                'layer': openapi.Schema(type=openapi.TYPE_STRING, enum=['backend', 'frontend']),
+                'scenarios': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING),  
+                    description="[HAPPY_PATH, VALIDATION_ERROR, AUTH_ERROR, EDGE_CASE, SECURITY]"),
+            }
+        ),
+        responses={
+            200: openapi.Response("Draft generated", openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_OBJECT))),
+            400: "Invalid Input"
+        }
+    )
     @method_decorator(ratelimit(key='user', rate='2/h', method='POST'))
     def post(self, request):
         collection_id = request.data.get("collection")
@@ -109,6 +130,28 @@ class BatchCreateTestsView(APIView):
     """
     permission_classes = [permissions.IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_description="Batch save generated tests to database",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'collection_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Global collection ID override"),
+                'auto_run': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=True),
+                'tests': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_OBJECT, 
+                    properties={
+                        'name': openapi.Schema(type=openapi.TYPE_STRING),
+                        'collection_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'test_script': openapi.Schema(type=openapi.TYPE_STRING),
+                        'runner_type': openapi.Schema(type=openapi.TYPE_STRING),
+                       
+                    }
+                ))
+            }
+        ),
+        responses={
+            201: "Tests Created"
+        }
+    )
     def post(self, request):
         # Expecting structure: { "collection_id": 1, "auto_run": true, "tests": [...] }
         payload = request.data
@@ -227,7 +270,6 @@ class RunTestView(APIView):
                 logger.error(f"Celery error: {e}. Falling back to sync run.")
         
         runner = RunnerService()
-        result = runner.execute_test(test_case.id)
         return Response({
             "status": result.status,
             "response_status": result.response_status,
@@ -236,6 +278,63 @@ class RunTestView(APIView):
             "logs": result.logs,
             "run_id": result.id
         }, status=status.HTTP_200_OK)
+
+
+
+
+class TriggerTestRunView(APIView):
+    """
+    Webhook endpoint to trigger test runs from CIs (GitHub Actions, etc.)
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Trigger test runs via webhook",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['project_id'],
+            properties={
+                'project_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                'collection_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Optional: specific collection"),
+                'target_url': openapi.Schema(type=openapi.TYPE_STRING, description="Override base URL for this run (e.g. staging deployment)")
+            }
+        ),
+        responses={
+            202: "Tests Queued"
+        }
+    )
+    def post(self, request):
+        project_id = request.data.get('project_id')
+        collection_id = request.data.get('collection_id')
+        target_url = request.data.get('target_url')
+        
+        if not project_id:
+            return Response({'error': 'project_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # Verify ownership
+        project = get_object_or_404(Project, id=project_id, user=request.user)
+        
+        # Build Query
+        test_cases = TestCase.objects.filter(collection__project=project)
+        if collection_id:
+            test_cases = test_cases.filter(collection_id=collection_id)
+            
+        if not test_cases.exists():
+            return Response({'message': 'No tests found to run'}, status=status.HTTP_404_NOT_FOUND)
+            
+        # Enqueue runs
+        run_ids = []
+        if HAS_CELERY:
+            for tc in test_cases:
+                task = run_test_case_task.delay(tc.id, override_url=target_url)
+                run_ids.append(task.id)
+                
+            return Response({
+                'message': f'Queued {len(run_ids)} tests',
+                'task_ids': run_ids
+            }, status=status.HTTP_202_ACCEPTED)
+        else:
+            return Response({'error': 'Async runner not available'}, status=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 
