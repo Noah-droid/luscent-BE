@@ -61,7 +61,16 @@ class AITestGenerator:
             scenario_instruction = f"""
             STRICT REQUIREMENT: You must ONLY generate test cases for the following scenarios:
             {scenario_list}
-            Do NOT generate any other types of tests (e.g. if 'SECURITY' is not listed, do not generate SQL injection tests).
+            
+            Do NOT generate any other types of tests.
+            
+            SCENARIO GUIDELINES:
+            - If 'SECURITY' is listed:
+              1. Generate tests for SQL Injection, XSS, and Broken Access Control.
+              2. CRITICAL: If the endpoint accepts a text prompt, chat message, or user query (AI Endpoint), you MUST generate **Prompt Injection** tests (e.g., 'Ignore previous instructions', 'DAN Mode', 'Leak System Prompt').
+              3. Check for PII leaks in responses.
+            - If 'HAPPY_PATH' is listed: Focus on 200/201 responses with valid data.
+            - If 'VALIDATION_ERROR' is listed: Focus on 400 responses with missing/invalid fields.
             """
         else:
             scenario_instruction = "Generate 3 diverse test cases covering happy paths and common error validation."
