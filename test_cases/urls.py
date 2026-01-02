@@ -2,11 +2,13 @@ from django.urls import path
 from .views import (
     TestCaseListCreateView, TestCaseDetailView, RunTestView,
     TestRunListView, TestRunDetailView, DraftTestPlanView, BatchCreateTestsView,
-    TestConfigView
+    TestConfigView,
+    TriggerTestRunView
 )
 
 urlpatterns = [
     path("ai/scenarios/", TestConfigView.as_view(), name="ai-config"),
+    path("webhook/trigger/", TriggerTestRunView.as_view(), name="webhook-trigger"),
     path("", TestCaseListCreateView.as_view(), name="testcase-list-create"),
     path("ai/draft/", DraftTestPlanView.as_view(), name="ai-draft-plan"),
     path("batch-create/", BatchCreateTestsView.as_view(), name="testcase-batch-create"),
