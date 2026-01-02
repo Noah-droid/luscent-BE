@@ -8,14 +8,14 @@ import os
 logger = logging.getLogger(__name__)
 
 class RunnerService:
-    def execute_test(self, test_case_id):
+    def execute_test(self, test_case_id, override_url=None):
         try:
             test_case = TestCase.objects.get(id=test_case_id)
         except TestCase.DoesNotExist:
             logger.error(f"TestCase {test_case_id} not found.")
             return None
 
-        # 1. Create Test Run
+        # 1. Create Test Run (with metadata about trigger?)
         test_run = TestRun.objects.create(test_case=test_case, status="running")
         
         try:
@@ -25,11 +25,11 @@ class RunnerService:
             runner_type = getattr(test_case, 'runner_type', 'http')
             
             if runner_type == 'http':
-                self._run_http_test(test_case, test_run)
+                self._run_http_test(test_case, test_run, override_url=override_url)
             elif runner_type == 'browser':
-                self._run_browser_test(test_case, test_run)
+                self._run_browser_test(test_case, test_run, override_url=override_url)
             elif runner_type == 'load':
-                self._run_load_test(test_case, test_run)
+                self._run_load_test(test_case, test_run, override_url=override_url)
             else:
                 raise ValueError(f"Unknown runner type: {runner_type}")
                 
@@ -55,7 +55,7 @@ class RunnerService:
 
 
 
-    def _run_http_test(self, test_case, test_run):
+    def _run_http_test(self, test_case, test_run, override_url=None):
         """
         Standard internal HTTP execution (using requests)
         Future: Delegate to qai-runner-http container
@@ -64,7 +64,20 @@ class RunnerService:
         from django.conf import settings
         
         collection = test_case.collection
-        full_url = collection.url
+        
+        # Override URL for Webhook Preview Deployments
+        if override_url:
+            
+            from urllib.parse import urlparse, urljoin
+            
+            # Simple replace logic
+            orig_parsed = urlparse(collection.url)
+            override_parsed = urlparse(override_url)
+            
+            # Reconstruct: Override Scheme+Netloc, keep Path+Params of collection
+            full_url = collection.url.replace(f"{orig_parsed.scheme}://{orig_parsed.netloc}", override_url.rstrip('/'))
+        else:
+            full_url = collection.url
         method = collection.method.upper()
         
         # SECURITY: Validate URL before making request
@@ -161,11 +174,11 @@ class RunnerService:
 
 
 
-    def _run_browser_test(self, test_case, test_run):
+    def _run_browser_test(self, test_case, test_run, override_url=None):
         """
         Executes the generated Playwright script in a subprocess.
         WARNING: This is running generated code on the host machine. 
-        ENSURE PROPER ISOLATION IN PRODUCTION (Docker/Firecracker).
+
         """
         script_content = test_case.test_script
         if not script_content:
@@ -311,13 +324,14 @@ class RunnerService:
             test_run.save()
 
 
-    def _run_load_test(self, test_case, test_run):
+    def _run_load_test(self, test_case, test_run, override_url=None):
         """
         Executes a Locust load test against the target endpoint.
         """
         import subprocess
         import json
         import shutil
+        from urllib.parse import urlparse
         
         # Check if locust is installed
         if not shutil.which("locust"):
@@ -327,9 +341,15 @@ class RunnerService:
             return
 
         # Prepare payload for the locustfile
+        current_url = test_case.collection.url
+        if override_url:
+            # Reconstruct URL with override base
+            orig_parsed = urlparse(current_url)
+            current_url = current_url.replace(f"{orig_parsed.scheme}://{orig_parsed.netloc}", override_url.rstrip('/'))
+
         endpoint_data = {
             "method": test_case.collection.method,
-            "url": test_case.collection.url, # Full URL
+            "url": current_url, # Full URL
             "headers": {**test_case.collection.headers, **test_case.headers},
             "body": test_case.body or test_case.collection.request_body,
             "expected_status": test_case.expected_status
@@ -339,8 +359,7 @@ class RunnerService:
         locust_file = os.path.join(os.path.dirname(__file__), "locustfile.py")
         
         # Extract Base Host (Scheme + Netloc)
-        from urllib.parse import urlparse
-        parsed = urlparse(test_case.collection.url)
+        parsed = urlparse(current_url)
         base_host = f"{parsed.scheme}://{parsed.netloc}"
 
         # Command: locust -f locustfile.py --headless -u 10 -r 2 -t 10s --host=... --endpoint-data='{...}'
