@@ -6,14 +6,14 @@ from .models import User, APIToken
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
     """Custom user admin"""
-    list_display = ['email', 'username', 'is_staff', 'test_runs_count', 'test_runs_limit', 'created_at']
+    list_display = ['email', 'username', 'is_staff', 'test_runs_count', 'token_balance', 'created_at']
     list_filter = ['is_staff', 'is_active', 'created_at']
     search_fields = ['email', 'username']
     ordering = ['-created_at']
     
     fieldsets = BaseUserAdmin.fieldsets + (
         ('Usage Tracking', {
-            'fields': ('test_runs_count', 'test_runs_limit')
+            'fields': ('test_runs_count', 'token_balance', 'is_verified', 'verification_token')
         }),
     )
 
