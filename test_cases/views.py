@@ -105,6 +105,15 @@ class DraftTestPlanView(APIView):
         # Enforce logic: Performance = Load Runner
         if category.lower() == "performance":
             runner_type = "load"
+            
+        # Billing: Deduct 5 Tokens for AI Generation
+        from billing.services import deduct_tokens
+        COST = 5
+        if not deduct_tokens(request.user, COST, f"AI Generation: {collection_item.name}"):
+             return Response(
+                 {"error": f"Insufficient tokens. Required: {COST}, Balance: {request.user.token_balance}"}, 
+                 status=402 # Payment Required
+             )
 
         generator = AITestGenerator()
         try:
@@ -224,15 +233,27 @@ class BatchCreateTestsView(APIView):
 
         # Handle Auto-Run
         if should_auto_run and created_tests:
-            for test in created_tests:
-                if HAS_CELERY:
-                    try:
-                        run_test_case_task.delay(test.id)
-                    except Exception as e:
-                        logger.error(f"Failed to queue task: {e}. Falling back to sync.")
+            from billing.services import deduct_tokens, calculate_test_cost
+            total_auto_run_cost = sum(calculate_test_cost(test.runner_type) for test in created_tests)
+            
+            can_auto_run = deduct_tokens(
+                request.user, 
+                total_auto_run_cost, 
+                f"Batch Auto-Run: {len(created_tests)} tests"
+            )
+            
+            if can_auto_run:
+                for test in created_tests:
+                    if HAS_CELERY:
+                        try:
+                            run_test_case_task.delay(test.id)
+                        except Exception as e:
+                            logger.error(f"Failed to queue task: {e}. Falling back to sync.")
+                            RunnerService().execute_test(test.id)
+                    else:
                         RunnerService().execute_test(test.id)
-                else:
-                    RunnerService().execute_test(test.id)
+            else:
+                errors.append({"error": f"Insufficient tokens for auto-run. Required: {total_auto_run_cost}, Balance: {request.user.token_balance}. Tests were created but not run."})
 
 
         serializer = TestCaseSerializer(created_tests, many=True)
@@ -261,6 +282,16 @@ class RunTestView(APIView):
     def post(self, request, pk):
         test_case = get_object_or_404(TestCase, id=pk, collection__project__user=request.user)
         run_async = request.data.get("async", True) and HAS_CELERY
+        
+        # Billing: Deduct Tokens
+        from billing.services import deduct_tokens, calculate_test_cost
+        cost = calculate_test_cost(test_case.runner_type)
+        
+        if not deduct_tokens(request.user, cost, f"Run Test: {test_case.name}"):
+             return Response(
+                 {"error": f"Insufficient tokens. Required: {cost}, Balance: {request.user.token_balance}"}, 
+                 status=402
+             )
         
         if run_async:
             try:
@@ -322,6 +353,15 @@ class TriggerTestRunView(APIView):
         if not test_cases.exists():
             return Response({'message': 'No tests found to run'}, status=status.HTTP_404_NOT_FOUND)
             
+        # Billing: Calculate Total Cost
+        from billing.services import deduct_tokens, calculate_test_cost
+        total_cost = sum(calculate_test_cost(tc.runner_type) for tc in test_cases)
+        
+        if not deduct_tokens(request.user, total_cost, f"Webhook Trigger: {project.name}"):
+            return Response({
+                'error': f'Insufficient tokens. Required: {total_cost}, Balance: {request.user.token_balance}'
+            }, status=status.HTTP_402_PAYMENT_REQUIRED)
+
         # Enqueue runs
         run_ids = []
         if HAS_CELERY:
@@ -330,7 +370,7 @@ class TriggerTestRunView(APIView):
                 run_ids.append(task.id)
                 
             return Response({
-                'message': f'Queued {len(run_ids)} tests',
+                'message': f'Queued {len(run_ids)} tests (Total Cost: {total_cost})',
                 'task_ids': run_ids
             }, status=status.HTTP_202_ACCEPTED)
         else:
