@@ -23,21 +23,6 @@ class User(AbstractUser):
     def __str__(self):
         return self.email
     
-    def deduct_tokens(self, amount):
-        """
-        Deduct tokens if sufficient balance.
-        Returns True if successful, False if insufficient funds.
-        """
-        if self.token_balance >= amount:
-            self.token_balance -= amount
-            self.save()
-            return True
-        return False
-        
-    def add_tokens(self, amount):
-        self.token_balance += amount
-        self.save()
-
     def increment_test_runs(self):
         """Increment the lifetime test run counter"""
         self.test_runs_count += 1
