@@ -54,6 +54,8 @@ INSTALLED_APPS = [
     'projects',
     'collection',
     'test_cases',
+    'billing',
+    'encrypted_model_fields',
 ]
 
 # Custom user model
