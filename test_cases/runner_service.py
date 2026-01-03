@@ -35,6 +35,12 @@ class RunnerService:
                 
             test_run.save()
             
+            # Increment lifetime stat
+            try:
+                test_case.collection.project.user.increment_test_runs()
+            except Exception as e:
+                logger.error(f"Failed to increment test_runs_count: {e}")
+            
         
             from notifications.services import send_test_run_report
             send_test_run_report(test_run)
