@@ -11,7 +11,7 @@ class User(AbstractUser):
     
     # Usage tracking
     test_runs_count = models.IntegerField(default=0)
-    test_runs_limit = models.IntegerField(default=100)  # Free tier limit
+    token_balance = models.IntegerField(default=100) # Start with 100 free tokens
     
     # Verification
     is_verified = models.BooleanField(default=False)
@@ -23,14 +23,25 @@ class User(AbstractUser):
     def __str__(self):
         return self.email
     
-    def can_run_test(self):
-        """Check if user has remaining test runs"""
-        return self.test_runs_count < self.test_runs_limit
-    
-    def increment_test_runs(self):
-        """Increment test run counter"""
-        self.test_runs_count += 1
+    def deduct_tokens(self, amount):
+        """
+        Deduct tokens if sufficient balance.
+        Returns True if successful, False if insufficient funds.
+        """
+        if self.token_balance >= amount:
+            self.token_balance -= amount
+            self.save()
+            return True
+        return False
+        
+    def add_tokens(self, amount):
+        self.token_balance += amount
         self.save()
+
+    def increment_test_runs(self):
+        """Increment the lifetime test run counter"""
+        self.test_runs_count += 1
+        self.save(update_fields=['test_runs_count'])
 
 
 class APIToken(models.Model):
