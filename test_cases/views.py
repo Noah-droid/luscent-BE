@@ -47,17 +47,17 @@ class TestConfigView(APIView):
         return Response(config)
 
 
-class TestCaseListCreateView(generics.ListCreateAPIView):
-    # Kept for backward compatibility and manual creation
-    serializer_class = TestCaseSerializer
-    permission_classes = [permissions.IsAuthenticated]
+# class TestCaseListCreateView(generics.ListCreateAPIView):
+#     # Kept for backward compatibility and manual creation
+#     serializer_class = TestCaseSerializer
+#     permission_classes = [permissions.IsAuthenticated]
 
-    def get_queryset(self):
-        return TestCase.objects.filter(collection__project__user=self.request.user)
+#     def get_queryset(self):
+#         return TestCase.objects.filter(collection__project__user=self.request.user)
 
-    def perform_create(self, serializer):
-        # Ensure we don't allow creating specific IDs if not needed
-        serializer.save()
+#     def perform_create(self, serializer):
+#         # Ensure we don't allow creating specific IDs if not needed
+#         serializer.save()
 
 
 
@@ -78,8 +78,9 @@ class DraftTestPlanView(APIView):
             properties={
                 'collection': openapi.Schema(type=openapi.TYPE_INTEGER),
                 'runner_type': openapi.Schema(type=openapi.TYPE_STRING, enum=['http', 'load', 'browser']),
-                'category': openapi.Schema(type=openapi.TYPE_STRING, enum=['functional', 'performance', 'security']),
+                'category': openapi.Schema(type=openapi.TYPE_STRING, enum=['functional', 'performance', 'security', "smoke", "regression", 'e2e']),
                 'layer': openapi.Schema(type=openapi.TYPE_STRING, enum=['backend', 'frontend']),
+                'use_visual_ai': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=False, description="Enable Visual AI analysis for generated tests"),
                 'scenarios': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING),  
                     description="[HAPPY_PATH, VALIDATION_ERROR, AUTH_ERROR, EDGE_CASE, SECURITY]"),
             }
@@ -100,6 +101,7 @@ class DraftTestPlanView(APIView):
         runner_type = request.data.get("runner_type", "http")
         category = request.data.get("category", "functional")
         layer = request.data.get("layer", "backend")
+        use_visual_ai = request.data.get("use_visual_ai", False)
         scenarios = request.data.get("scenarios", []) # e.g. ["HAPPY_PATH"]
 
         # Enforce logic: Performance = Load Runner
@@ -117,13 +119,14 @@ class DraftTestPlanView(APIView):
 
         generator = AITestGenerator()
         try:
-            # 1. Call AI
+            # Call AI
             draft_tests = generator.generate_tests(
                 collection_item, 
                 runner_type=runner_type,
                 category=category,
                 layer=layer,
-                scenarios=scenarios
+                scenarios=scenarios,
+                use_visual_ai=use_visual_ai
             )
             return Response(draft_tests, status=status.HTTP_200_OK)
         except Exception as e:
