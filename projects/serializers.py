@@ -3,6 +3,7 @@ from .models import Project
 
 
 class ProjectSerializer(serializers.ModelSerializer):
+
     class Meta:
         model = Project
         fields = [
@@ -13,6 +14,10 @@ class ProjectSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+        extra_kwargs = {
+            'environment_variables': {'required': False},
+        }
         read_only_fields = ["id", "created_at", "updated_at"]
 
 
