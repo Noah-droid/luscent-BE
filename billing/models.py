@@ -14,7 +14,7 @@ class Transaction(models.Model):
     balance_after = models.IntegerField()
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
     description = models.CharField(max_length=255)
-    reference_id = models.CharField(max_length=100, blank=True, null=True, help_text="Stripe ID or TestRun ID")
+    reference_id = models.CharField(max_length=100, blank=True, null=True, help_text="TestRun ID")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
