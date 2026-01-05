@@ -35,5 +35,5 @@ def run_test_case_task(self, test_case_id, override_url=None):
         if "quota" not in str(exc).lower() and "validation" not in str(exc).lower():
             raise self.retry(exc=exc)
         else:
-            # Don't retry, just fail
+            # Don't retry, fail
             raise
