@@ -292,6 +292,9 @@ class RunnerService:
                 os.rmdir(screenshot_dir)
             except:
                 pass
+            
+            # Save test run results
+            test_run.save()
 
 
     def _perform_visual_ai_check(self, test_run, screenshot_path):
@@ -411,6 +414,9 @@ class RunnerService:
         except Exception as e:
             test_run.status = "error"
             test_run.error_message = f"Load runner failed: {e}"
+        finally:
+            # Save test run results
+            test_run.save()
 
     def _check_assertions(self, response, test_case):
         if response.status_code != test_case.expected_status:
