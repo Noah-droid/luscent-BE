@@ -62,12 +62,11 @@ class RegisterView(generics.CreateAPIView):
         # Create API token for CLI usage
         api_token = APIToken.objects.create(user=user, name="Default Token")
         
-        # Generate JWT tokens for web dashboard
-        refresh = RefreshToken.for_user(user)
         
         return Response({
             'user': UserSerializer(user).data,
-            'api_token': api_token.token,  
+            'api_token': api_token.token,  # For CLI
+           
             'message': 'User registered successfully. Please check your email for the verification code.'
         }, status=status.HTTP_201_CREATED)
 
@@ -106,7 +105,12 @@ class VerifyEmailView(APIView):
             user.verification_token = None  # Clear OTP after use
             user.save()
             
-            return Response({'message': 'Email verified successfully'}, status=200)
+            refresh = RefreshToken.for_user(user)
+            
+            return Response({'message': 'Email verified successfully',  
+                    'access_token': str(refresh.access_token),  
+                    'refresh_token': str(refresh),  
+            }, status=200)
         except User.DoesNotExist:
             return Response({'error': 'User not found'}, status=404)
 
