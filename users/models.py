@@ -53,7 +53,3 @@ class APIToken(models.Model):
         if not self.token:
             self.token = self.generate_token()
         super().save(*args, **kwargs)
-
-qai
-djanitor
-Poom
