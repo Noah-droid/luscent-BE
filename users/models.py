@@ -47,11 +47,13 @@ class APIToken(models.Model):
     @staticmethod
     def generate_token():
         """Generate a secure random token"""
-        return f"qai_{secrets.token_urlsafe(32)}"
+        return f"luscent{secrets.token_urlsafe(32)}"
     
     def save(self, *args, **kwargs):
         if not self.token:
             self.token = self.generate_token()
         super().save(*args, **kwargs)
 
-
+qai
+djanitor
+Poom
