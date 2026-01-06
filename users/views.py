@@ -67,9 +67,7 @@ class RegisterView(generics.CreateAPIView):
         
         return Response({
             'user': UserSerializer(user).data,
-            'api_token': api_token.token,  # For CLI
-            'access_token': str(refresh.access_token),  
-            'refresh_token': str(refresh),  
+            'api_token': api_token.token,  
             'message': 'User registered successfully. Please check your email for the verification code.'
         }, status=status.HTTP_201_CREATED)
 
