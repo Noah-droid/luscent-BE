@@ -58,3 +58,8 @@ class APITokenSerializer(serializers.ModelSerializer):
         model = APIToken
         fields = ['id', 'token', 'name', 'created_at', 'last_used_at', 'is_active']
         read_only_fields = ['id', 'token', 'created_at', 'last_used_at']
+
+
+class GithubLoginSerializer(serializers.Serializer):
+    """Serializer for Github Login"""
+    code = serializers.CharField(required=True)
