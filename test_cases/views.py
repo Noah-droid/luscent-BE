@@ -149,7 +149,7 @@ class RefineTestDraftView(APIView):
             properties={
                 'draft': openapi.Schema(type=openapi.TYPE_OBJECT, description="The JSON object of the test case"),
                 'instruction': openapi.Schema(type=openapi.TYPE_STRING, description="Instructions for modification"),
-                'collection_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Optional: Context for the endpoint")
+                'collection_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Context for the endpoint")
             }
         ),
         responses={200: "Updated Draft JSON"}
