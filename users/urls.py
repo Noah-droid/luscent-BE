@@ -7,7 +7,8 @@ from .views import (
     RefreshTokenView,
     LogoutView,
     VerifyEmailView,
-    ResendOTPView
+    ResendOTPView,
+    GithubLoginView
 )
 
 app_name = 'users'
@@ -21,4 +22,5 @@ urlpatterns = [
     path('me/', CurrentUserView.as_view(), name='current-user'),
     path('tokens/', UserTokensView.as_view(), name='tokens'),
     path('token/refresh/', RefreshTokenView.as_view(), name='token-refresh'),
+    path('github/login/', GithubLoginView.as_view(), name='github-login'),
 ]
