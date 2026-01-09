@@ -16,6 +16,7 @@ import requests
 from django.conf import settings
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+from django.db import transaction
 
 
 class RegisterView(generics.CreateAPIView):
@@ -433,29 +434,36 @@ class GithubLoginView(APIView):
 
         # Get or Create User
         try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
-            # Create new user
-            username = user_data.get('login', email.split('@')[0])
-            # Ensure unique username
-            if User.objects.filter(username=username).exists():
-                import secrets
-                username = f"{username}_{secrets.token_hex(4)}"
-                
-            user = User.objects.create_user(
-                email=email,
-                username=username,
-                password=None # Unusable password
-            )
-            user.is_verified = True # Trusted source
-            user.save()
+            with transaction.atomic():
+                try:
+                    user = User.objects.get(email=email)
+                except User.DoesNotExist:
+                    # Create new user
+                    username = user_data.get('login', email.split('@')[0])
+                    # Ensure unique username
+                    if User.objects.filter(username=username).exists():
+                        import secrets
+                        username = f"{username}_{secrets.token_hex(4)}"
+                        
+                    user = User.objects.create_user(
+                        email=email,
+                        username=username,
+                        password=None # Unusable password
+                    )
+                    user.is_verified = True # Trusted source
+                    user.save()
 
-        # Generate Tokens
-        api_token, _ = APIToken.objects.get_or_create(
-            user=user,
-            name="Default Token",
-            defaults={'is_active': True}
-        )
+                # Generate Tokens
+                api_token, _ = APIToken.objects.get_or_create(
+                    user=user,
+                    name="Default Token",
+                    defaults={'is_active': True}
+                )
+        except Exception as e:
+            return Response(
+                {'error': f'Login failed during user processing: {str(e)}'},
+                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         
         refresh = RefreshToken.for_user(user)
         
