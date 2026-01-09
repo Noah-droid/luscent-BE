@@ -126,7 +126,6 @@ class DraftTestPlanView(APIView):
                 category=category,
                 layer=layer,
                 scenarios=scenarios,
-                use_visual_ai=use_visual_ai
             )
             return Response(draft_tests, status=status.HTTP_200_OK)
         except Exception as e:
