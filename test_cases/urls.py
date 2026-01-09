@@ -3,7 +3,7 @@ from .views import (
     # TestCaseListCreateView, 
     TestCaseDetailView, RunTestView,
     TestRunListView, TestRunDetailView, DraftTestPlanView, BatchCreateTestsView,
-    TestConfigView,
+    TestConfigView, RefineTestDraftView,
     TriggerTestRunView
 )
 
@@ -12,6 +12,7 @@ urlpatterns = [
     path("webhook/trigger/", TriggerTestRunView.as_view(), name="webhook-trigger"),
     # path("", TestCaseListCreateView.as_view(), name="testcase-list-create"),
     path("ai/draft/", DraftTestPlanView.as_view(), name="ai-draft-plan"),
+    path("ai/refine/", RefineTestDraftView.as_view(), name="ai-refine-draft"),
     path("batch-create/", BatchCreateTestsView.as_view(), name="testcase-batch-create"),
     path("<int:pk>/", TestCaseDetailView.as_view(), name="testcase-detail"),
     path("<int:pk>/run/", RunTestView.as_view(), name="testcase-run"),

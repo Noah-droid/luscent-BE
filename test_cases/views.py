@@ -133,6 +133,50 @@ class DraftTestPlanView(APIView):
 
 
 
+class RefineTestDraftView(APIView):
+    """
+    Step 1.5: Refine a specific draft test based on user feedback.
+    Input: { "draft": {...}, "instruction": "Make it check for 403 instead" }
+    Output: { ...updated_draft... }
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    
+    @swagger_auto_schema(
+        operation_description="Refine a generated test draft using AI",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['draft', 'instruction'],
+            properties={
+                'draft': openapi.Schema(type=openapi.TYPE_OBJECT, description="The JSON object of the test case"),
+                'instruction': openapi.Schema(type=openapi.TYPE_STRING, description="Instructions for modification"),
+                'collection_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Optional: Context for the endpoint")
+            }
+        ),
+        responses={200: "Updated Draft JSON"}
+    )
+    def post(self, request):
+        draft = request.data.get("draft")
+        instruction = request.data.get("instruction")
+        collection_id = request.data.get("collection_id")
+        
+        if not draft or not instruction:
+            return Response({"error": "Draft and instruction required"}, status=400)
+            
+        collection_item = None
+        if collection_id:
+             try:
+                 collection_item = Collection.objects.get(id=collection_id, project__user=request.user)
+             except Collection.DoesNotExist:
+                 return Response({"error": "Collection not found"}, status=404)
+
+        generator = AITestGenerator()
+        try:
+            updated_draft = generator.refine_test(draft, instruction, collection_item=collection_item)
+            return Response(updated_draft, status=200)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+
 class BatchCreateTestsView(APIView):
     """
     Step 2 of Hybrid Flow: Save approved/edited drafts to DB.
