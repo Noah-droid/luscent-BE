@@ -48,6 +48,44 @@ def send_verification_email(user, otp):
 
 
 
+def send_password_reset_email(user, otp):
+    """
+    Sends a password reset OTP to the user.
+    """
+    if not settings.RESEND_API_KEY:
+        logger.warning("Resend API key not configured. Skipping email.")
+        return
+
+    try:
+        html_content = f"""
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2>Reset your Password</h2>
+            <p>Hello {user.username},</p>
+            <p>Your password reset code is:</p>
+            
+            <div style="text-align: center; margin: 30px 0;">
+                <span style="background-color: #f3f4f6; padding: 12px 24px; font-size: 24px; letter-spacing: 5px; font-weight: bold; border-radius: 4px;">{otp}</span>
+            </div>
+            
+            <p style="color: #666; font-size: 14px;">This code will expire shortly. If you did not request a password reset, please ignore this email.</p>
+        </div>
+        """
+
+        params = {
+            "from": settings.DEFAULT_FROM_EMAIL,
+            "to": [user.email],
+            "subject": "Password Reset Code",
+            "html": html_content,
+        }
+
+        resend.Emails.send(params)
+        logger.info(f"Password reset OTP sent to {user.email}")
+        
+    except Exception as e:
+        logger.error(f"Failed to send password reset email: {e}")
+
+
+
 def send_test_run_report(test_run):
     """
     Sends an email report for a completed test run.
