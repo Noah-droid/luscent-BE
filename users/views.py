@@ -10,7 +10,9 @@ from .serializers import (
     RegisterSerializer,
     LoginSerializer,
     APITokenSerializer,
-    GithubLoginSerializer
+    GithubLoginSerializer,
+    ForgotPasswordSerializer,
+    ResetPasswordSerializer
 )
 import requests
 from django.conf import settings
@@ -465,6 +467,7 @@ class GithubLoginView(APIView):
                  status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         
+        
         refresh = RefreshToken.for_user(user)
         
         return Response({
@@ -476,3 +479,79 @@ class GithubLoginView(APIView):
         })
 
 
+class ForgotPasswordView(APIView):
+    """
+    Send OTP for password reset.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        operation_description="Send OTP for password reset",
+        request_body=ForgotPasswordSerializer,
+        responses={
+            200: "OTP sent successfully",
+            404: "User not found"
+        }
+    )
+    def post(self, request):
+        serializer = ForgotPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email']
+
+        try:
+            user = User.objects.get(email=email)
+            
+            # Generate 6-digit OTP
+            import random
+            otp = str(random.randint(100000, 999999))
+            
+            # Store OTP in verification_token field (reusing for reset)
+            user.verification_token = otp
+            user.save()
+            
+            # Send Email
+            from notifications.services import send_password_reset_email
+            send_password_reset_email(user, otp)
+            
+            return Response({'message': 'Password reset OTP sent successfully'}, status=200)
+        except User.DoesNotExist:
+            return Response({'error': 'User with this email not found'}, status=404)
+
+
+class ResetPasswordView(APIView):
+    """
+    Reset password using OTP.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        operation_description="Reset password using OTP",
+        request_body=ResetPasswordSerializer,
+        responses={
+            200: "Password reset successfully",
+            400: "Invalid OTP or passwords do not match",
+            404: "User not found"
+        }
+    )
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        email = serializer.validated_data['email']
+        otp = serializer.validated_data['otp']
+        password = serializer.validated_data['password']
+
+        try:
+            user = User.objects.get(email=email)
+            
+            if user.verification_token != otp:
+                return Response({'error': 'Invalid or expired OTP'}, status=400)
+            
+            # Reset password
+            user.set_password(password)
+            user.verification_token = None
+            user.save()
+            
+            return Response({'message': 'Password reset successfully'}, status=200)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=404)
