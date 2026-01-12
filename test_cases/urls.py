@@ -4,7 +4,7 @@ from .views import (
     TestCaseDetailView, RunTestView,
     TestRunListView, TestRunDetailView, DraftTestPlanView, BatchCreateTestsView,
     TestConfigView, RefineTestDraftView,
-    TriggerTestRunView
+    TriggerTestRunView, ProjectStatusView, ProjectAutoPilotView
 )
 
 urlpatterns = [
@@ -17,6 +17,9 @@ urlpatterns = [
     path("<int:pk>/", TestCaseDetailView.as_view(), name="testcase-detail"),
     path("<int:pk>/run/", RunTestView.as_view(), name="testcase-run"),
     path("<int:test_case_id>/runs/", TestRunListView.as_view(), name="testcase-runs"),
+    path("runs/", TestRunListView.as_view(), name="testrun-list"),
     path("runs/<int:pk>/", TestRunDetailView.as_view(), name="testrun-detail"),
+    path("projects/<int:project_id>/status/", ProjectStatusView.as_view(), name="project-status"),
+    path("projects/<int:project_id>/auto-pilot/", ProjectAutoPilotView.as_view(), name="project-auto-pilot"),
 ]
 
