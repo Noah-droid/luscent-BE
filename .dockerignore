@@ -4,3 +4,5 @@
 # Allow only explicit build dependencies
 !runner_api.py
 !Dockerfile.runner
+!test_cases/
+!test_cases/locustfile.py
