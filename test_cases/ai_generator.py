@@ -18,7 +18,7 @@ class AITestGenerator:
         self.max_tokens = 8192 
         self.temperature = 0.7
 
-    def generate_tests(self, collection_item, runner_type="http", category="functional", layer="backend", scenarios=None):
+    def generate_tests(self, collection_item, runner_type="http", category="functional", layer="backend", scenarios=None, user_story=None):
         """
         Generate test cases for a given Collection (endpoint) object.
         Returns a list of dicts suitable for creating TestCase objects.
@@ -29,11 +29,15 @@ class AITestGenerator:
             logger.warning(f"No API key found for provider {self.provider}. Skipping AI generation.")
             return []
 
-        prompt = self._construct_prompt(collection_item, runner_type, category, layer, scenarios)
+        prompt = self._construct_prompt(collection_item, runner_type, category, layer, scenarios, user_story)
         
         try:
             response = self._call_llm(prompt)
             test_cases_data = self._parse_response(response)
+            # Inject user_story into the result so it can be saved later
+            if user_story:
+                for test in test_cases_data:
+                    test['user_story'] = user_story
             return test_cases_data
         except Exception as e:
             logger.error(f"AI Generation failed ({self.provider}): {e}")
@@ -84,7 +88,7 @@ class AITestGenerator:
             logger.error(f"Refinement failed: {e}")
             raise e
 
-    def _construct_prompt(self, item, runner_type, category, layer, scenarios):
+    def _construct_prompt(self, item, runner_type, category, layer, scenarios, user_story=None):
         # Build context about the endpoint
         context = {
             "method": item.method,
@@ -101,6 +105,21 @@ class AITestGenerator:
 
         # Format requested scenarios for the prompt
         scenario_instruction = ""
+        
+        # Handle User Story Context (Highest Priority)
+        story_instruction = ""
+        if user_story:
+            story_instruction = f"""
+            CRITICAL - USER STORY / REQUIREMENTS:
+            The user has provided specific requirements/story for this test generation.
+            You MUST PRIORITIZE these requirements over generic scenarios.
+            
+            User Story:
+            "{user_story}"
+            
+            Interpret this story (even if in plain English or Gherkin) and generate tests that specifically verify these requirements.
+            """
+
         if scenarios and isinstance(scenarios, list):
             scenario_list = ", ".join(scenarios)
             scenario_instruction = f"""
@@ -128,6 +147,8 @@ class AITestGenerator:
         - Type: {category} Testing
         - Layer: {layer}
         - Runner: {runner_type}
+        
+        {story_instruction}
         
         {scenario_instruction}
         
