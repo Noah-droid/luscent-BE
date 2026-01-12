@@ -1,0 +1,6 @@
+# Ignore everything by default
+*
+
+# Allow only explicit build dependencies
+!runner_api.py
+!Dockerfile.runner
