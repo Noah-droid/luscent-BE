@@ -247,4 +247,5 @@ FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
 GITHUB_CLIENT_ID = config('GITHUB_CLIENT_ID', default='')
 GITHUB_CLIENT_SECRET = config('GITHUB_CLIENT_SECRET', default='')
 
-
+QAI_RUNNER_URL= config('QAI_RUNNER_URL')
+QAI_RUNNER_SECRET=config('QAI_RUNNER_SECRET')

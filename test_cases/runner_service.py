@@ -3,20 +3,33 @@ import time
 import logging
 from .models import TestCase, TestRun
 import os
+import shutil
+import subprocess
+import tempfile
+import json
+from django.conf import settings
 
 
 logger = logging.getLogger(__name__)
 
 class RunnerService:
-    def execute_test(self, test_case_id, override_url=None):
+    # runner image
+    RUNNER_IMAGE = "qai-runner-python:latest"
+
+    def execute_test(self, test_case_id, override_url=None, batch_id=None, triggered_by="manual"):
         try:
             test_case = TestCase.objects.get(id=test_case_id)
         except TestCase.DoesNotExist:
             logger.error(f"TestCase {test_case_id} not found.")
             return None
 
-        # 1. Create Test Run (with metadata about trigger?)
-        test_run = TestRun.objects.create(test_case=test_case, status="running")
+        # Create Test Run
+        test_run = TestRun.objects.create(
+            test_case=test_case, 
+            status="running",
+            batch_id=batch_id,
+            triggered_by=triggered_by
+        )
         
         try:
             start_time = time.time()
@@ -63,128 +76,268 @@ class RunnerService:
 
     def _run_http_test(self, test_case, test_run, override_url=None):
         """
-        Standard internal HTTP execution (using requests)
-        Future: Delegate to qai-runner-http container
+        Executes an HTTP request inside the hardened sandbox.
         """
         from .security import require_safe_url, URLSecurityError
         from django.conf import settings
         
         collection = test_case.collection
         
-        # Override URL for Webhook Preview Deployments
+        # URL Resolution
         if override_url:
-            
-            from urllib.parse import urlparse, urljoin
-            
-            # Simple replace logic
+            from urllib.parse import urlparse
             orig_parsed = urlparse(collection.url)
-            override_parsed = urlparse(override_url)
-            
-            # Reconstruct: Override Scheme+Netloc, keep Path+Params of collection
             full_url = collection.url.replace(f"{orig_parsed.scheme}://{orig_parsed.netloc}", override_url.rstrip('/'))
         else:
             full_url = collection.url
-        method = collection.method.upper()
-        
-        # SECURITY: Validate URL before making request
+
+        # SECURITY: Validate URL on host before sending to sandbox
         try:
-            allow_localhost = getattr(settings, 'DEBUG', False)  # Only in development
+            allow_localhost = getattr(settings, 'DEBUG', False)
             require_safe_url(full_url, allow_localhost=allow_localhost)
         except URLSecurityError as e:
             test_run.status = "error"
             test_run.error_message = f"Security Error: {str(e)}"
-            logger.warning(f"Blocked unsafe URL in test {test_case.id}: {full_url} - {e}")
+            test_run.save()
             return
         
-        # Prepare headers
+        # Prepare data for the sandbox script
         headers = {**collection.headers, **test_case.headers}
-        
-        # Handle Authentication
         if collection.auth_type == "bearer":
              headers["Authorization"] = f"Bearer {collection.auth_value}"
         elif collection.auth_type == "api_key":
              headers["X-API-Key"] = collection.auth_value
-        elif collection.auth_type == "basic":
-             # Basic auth handling usually requires encoding, skipping for brevity or add logic
-             pass 
 
         params = {**collection.query_params, **test_case.query_params}
         body = test_case.body if test_case.body else collection.request_body
         
-        resp = requests.request(
-            method=method,
-            url=full_url,
-            headers=headers,
-            params=params,
-            json=body,
-            timeout=30,
-            max_redirects=5,
-            allow_redirects=True,
-            stream=True,
-        )
-        
-        # SECURITY: Check response size before reading
-        MAX_RESPONSE_SIZE = 10 * 1024 * 1024  # 10 MB
-        content_length = resp.headers.get('Content-Length')
-        
-        if content_length:
-            try:
-                size = int(content_length)
-                if size > MAX_RESPONSE_SIZE:
-                    test_run.status = "error"
-                    test_run.error_message = f"Response too large: {size / (1024*1024):.2f} MB (max: 10 MB)"
-                    test_run.response_status = resp.status_code
-                    test_run.response_headers = dict(resp.headers)
-                    logger.warning(f"Blocked large response for test {test_case.id}: {size} bytes")
-                    return
-            except ValueError:
-                pass  # Invalid Content-Length, proceed with chunk reading
-        
-        # Read response in chunks with size limit
-        content = b""
+        # Generate the execution script
+        # JSON serialization 
+        sandbox_script = f"""
+        import requests
+        import json
+        import time
+
         try:
-            for chunk in resp.iter_content(chunk_size=8192):
-                content += chunk
-                if len(content) > MAX_RESPONSE_SIZE:
-                    test_run.status = "error"
-                    test_run.error_message = f"Response exceeded size limit during download (max: 10 MB)"
-                    test_run.response_status = resp.status_code
-                    test_run.response_headers = dict(resp.headers)
-                    logger.warning(f"Response exceeded limit for test {test_case.id}")
-                    return
+            start_time = time.time()
+            resp = requests.request(
+                method="{collection.method.upper()}",
+                url="{full_url}",
+                headers={json.dumps(headers)},
+                params={json.dumps(params)},
+                json={json.dumps(body)},
+                timeout=30,
+                allow_redirects=True,
+            )
+            duration = int((time.time() - start_time) * 1000)
+            
+            # Check size limit in container too (defense in depth)
+            MAX_SIZE = 10 * 1024 * 1024
+            content = resp.content
+            if len(content) > MAX_SIZE:
+                print(json.dumps({{"error": "Response exceeded 10MB limit"}}))
+                exit(0)
+
+            # Output structured results
+            print(json.dumps({{
+                "status": resp.status_code,
+                "headers": dict(resp.headers),
+                "body": resp.text if len(content) < 1000000 else "Body too large to display",
+                "duration": duration
+            }}))
+        except Exception as e:
+            print(json.dumps({{"error": str(e)}}))
+        """
+
+        # Run in Sandbox
+        result = self._run_in_sandbox(sandbox_script, timeout=40)
+        
+        # Parse result and update models
+        if "error" in result:
+             test_run.status = "error"
+             test_run.error_message = result["error"]
+             test_run.save()
+             return
+
+        try:
+            # The script outputs a single JSON line
+            stdout_data = result.get("stdout", "").strip()
+            # If there's multiple lines (from prints), take the last one
+            last_line = stdout_data.split('\n')[-1]
+            http_data = json.loads(last_line)
+            
+            if "error" in http_data:
+                test_run.status = "failed"
+                test_run.error_message = http_data["error"]
+            else:
+                # Use the dummy response object to check assertions
+                from collections import namedtuple
+                ResponseMock = namedtuple('ResponseMock', ['status_code', 'text', 'headers'])
+                mock_resp = ResponseMock(
+                    status_code=http_data['status'],
+                    text=http_data['body'],
+                    headers=http_data['headers']
+                )
+                
+                passed, error = self._check_assertions(mock_resp, test_case)
+                
+                test_run.status = "passed" if passed else "failed"
+                test_run.error_message = error
+                test_run.response_status = http_data['status']
+                test_run.response_headers = http_data['headers']
+                test_run.response_body = http_data['body']
+                test_run.response_time_ms = http_data['duration']
+                
         except Exception as e:
             test_run.status = "error"
-            test_run.error_message = f"Error reading response: {str(e)}"
-            return
+            test_run.error_message = f"Failed to parse sandbox output: {str(e)}"
+            test_run.logs = result.get("stdout")
         
-        duration = int((time.time() - test_run.executed_at.timestamp()) * 1000)
-        passed, error = self._check_assertions(resp, test_case)
+        test_run.save()
+
+
+
+
+    def _run_in_sandbox(self, script_content, env_vars=None, timeout=60, use_network=True):
+        """
+        Executes a script inside a hardened sandbox.
+        Automatically switches between Local Docker and Remote Cloud Run.
+        """
+        # Check for Remote Runner (Production Mode)
+        remote_url = getattr(settings, 'QAI_RUNNER_URL', None)
+        if remote_url:
+            return self._run_remote(remote_url, script_content, env_vars, timeout)
+
+        # Check for Local Docker (Development Mode)
+        if not shutil.which("docker"):
+            logger.warning("Docker not found. Falling back to host execution (UNSAFE).")
+            return self._run_on_host(script_content, env_vars, timeout)
+
+        # Prepare temp directory for script and results
+        temp_dir = tempfile.mkdtemp()
+        script_path = os.path.join(temp_dir, "test_script.py")
         
-        test_run.status = "passed" if passed else "failed"
-        test_run.error_message = error
-        test_run.response_status = resp.status_code
-        test_run.response_time_ms = duration
-        test_run.response_headers = dict(resp.headers)
-        
-        # Try to parse as JSON, fallback to text
+        with open(script_path, "w") as f:
+            f.write(script_content)
+
         try:
-            test_run.response_body = resp.json()
-        except:
-            # Store truncated text response
-            try:
-                text_content = content.decode('utf-8', errors='ignore')
-                test_run.logs = text_content[:5000]  # Truncate to 5000 chars
-            except:
-                test_run.logs = "Binary response (not displayable)"
+            # Build docker command
+            cmd = [
+                "docker", "run", "--rm",
+                "--network", "bridge" if use_network else "none",
+                "--memory", "512m",
+                "--cpus", "0.5",
+                "-v", f"{temp_dir}:/app",
+                "-w", "/app",
+            ]
 
+            # Add gVisor runtime if enabled in settings
+            gvisor_runtime = getattr(settings, 'DOCKER_RUNTIME_SECURE', None)
+            if gvisor_runtime:
+                cmd.extend(["--runtime", gvisor_runtime])
 
+            # Add environment variables
+            if env_vars:
+                for k, v in env_vars.items():
+                    cmd.extend(["-e", f"{k}={v}"])
 
+            # Add image and script to execute
+            # We must explicitly call 'python' because the Dockerfile default is now the API server
+            cmd.extend([self.RUNNER_IMAGE, "python", "test_script.py"])
+
+            start_time = time.time()
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            duration = int((time.time() - start_time) * 1000)
+
+            return {
+                "stdout": process.stdout,
+                "stderr": process.stderr,
+                "returncode": process.returncode,
+                "duration": duration,
+                "temp_dir": temp_dir # Kept for artifact extraction
+            }
+
+        except subprocess.TimeoutExpired:
+            return {"error": f"Timeout after {timeout}s", "returncode": -1, "duration": timeout*1000}
+        except Exception as e:
+            return {"error": str(e), "returncode": -1, "duration": 0}
+
+    def _run_remote(self, url, script_content, env_vars=None, timeout=60):
+        """
+        Sends the test to a remote Cloud Run instance.
+        """
+        secret = getattr(settings, 'QAI_RUNNER_SECRET', "")
+        
+        try:
+            start_time = time.time()
+            response = requests.post(
+                f"{url.rstrip('/')}/execute",
+                json={
+                    "script": script_content,
+                    "env_vars": env_vars or {},
+                    "timeout": timeout
+                },
+                headers={"X-QAi-Secret": secret},
+                timeout=timeout + 5
+            )
+            
+            if response.status_code != 200:
+                return {"error": f"Remote runner error: {response.text}", "returncode": -1}
+
+            data = response.json()
+            
+            # If there's a screenshot, we need to save it locally for artifact processing
+            temp_dir = None
+            if data.get("screenshot_b64"):
+                import base64
+                temp_dir = tempfile.mkdtemp()
+                with open(os.path.join(temp_dir, "screenshot.png"), "wb") as f:
+                    f.write(base64.b64decode(data["screenshot_b64"]))
+            
+            return {
+                "stdout": data.get("stdout", ""),
+                "stderr": data.get("stderr", ""),
+                "returncode": data.get("returncode", 0),
+                "duration": data.get("duration", int((time.time() - start_time) * 1000)),
+                "temp_dir": temp_dir
+            }
+
+        except Exception as e:
+            return {"error": f"Remote connection failed: {str(e)}", "returncode": -1}
+
+    def _run_on_host(self, script_content, env_vars=None, timeout=60):
+        """Standard subprocess execution (Original logic)"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp:
+            tmp.write(script_content)
+            tmp_path = tmp.name
+
+        try:
+            start = time.time()
+            process = subprocess.run(
+                ["python", tmp_path],
+                env={**(env_vars or {}), "PATH": os.environ.get("PATH", "")},
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            return {
+                "stdout": process.stdout,
+                "stderr": process.stderr,
+                "returncode": process.returncode,
+                "duration": int((time.time() - start) * 1000)
+            }
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     def _run_browser_test(self, test_case, test_run, override_url=None):
         """
-        Executes the generated Playwright script in a subprocess.
-        WARNING: This is running generated code on the host machine. 
-
+        Executes the generated Playwright script in a sandbox.
         """
         script_content = test_case.test_script
         if not script_content:
@@ -192,108 +345,56 @@ class RunnerService:
             test_run.error_message = "No test script provided for browser test."
             return
 
-        import subprocess
-        import sys
-        import tempfile
-        import os
-        from django.core.files import File
+        # Ensure necessary imports
+        if "from playwright.sync_api" not in script_content:
+            script_content = "from playwright.sync_api import sync_playwright\n" + script_content
 
-        # Prepare screenshot path (temp dir)
-        screenshot_dir = tempfile.mkdtemp()
-        screenshot_path = os.path.join(screenshot_dir, "screenshot.png")
+        # Run in sandbox
+        result = self._run_in_sandbox(
+            script_content,
+            env_vars={"SCREENSHOT_PATH": "/app/screenshot.png"},
+            timeout=60
+        )
 
-        # Write script to temp file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp:
-            # Prepend necessary imports if missing (simple heuristic)
-            if "from playwright.sync_api" not in script_content:
-                tmp.write("from playwright.sync_api import sync_playwright\n")
-            
-            # Wrap in a run function if it looks like a snippet
-            tmp.write(script_content)
-            tmp_path = tmp.name
+        test_run.logs = f"STDOUT:\n{result.get('stdout', '')}\n\nSTDERR:\n{result.get('stderr', '')}"
+        if "error" in result:
+             test_run.error_message = result["error"]
+             test_run.status = "error"
+             test_run.save()
+             return
+
+        test_run.response_time_ms = result["duration"]
+        temp_dir = result.get("temp_dir")
+        screenshot_path = os.path.join(temp_dir, "screenshot.png") if temp_dir else None
 
         try:
-            # Execute with RESTRICTED environment to prevent leaking secrets
-            # We only pass essential vars (PATH, etc.)
-            clean_env = {
-                "PATH": os.environ.get("PATH", ""),
-                "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""), # Windows
-                "HOME": os.environ.get("HOME", ""),
-                "LANG": "en_US.UTF-8",
-                "SCREENSHOT_PATH": screenshot_path # Pass to script
-            }
-            
-            start = time.time()
-            process = subprocess.run(
-                [sys.executable, tmp_path],
-                env=clean_env, 
-                capture_output=True,
-                text=True,
-                timeout=60 # 60s timeout
-            )
-            duration = int((time.time() - start) * 1000)
-            
-            test_run.logs = f"STDOUT:\n{process.stdout}\n\nSTDERR:\n{process.stderr}"
-            test_run.response_time_ms = duration
-            
-            # Check for screenshot artifact and upload to Cloudinary
-            if os.path.exists(screenshot_path):
+            # Check for screenshot artifact
+            if screenshot_path and os.path.exists(screenshot_path):
                 from .storage import CloudinaryStorage
-                
                 try:
                     storage = CloudinaryStorage()
-                    project = test_case.collection.project
-                    
-                    result = storage.upload_screenshot(
+                    upload_res = storage.upload_screenshot(
                         file_path=screenshot_path,
-                        project=project,
+                        project=test_case.collection.project,
                         test_run_id=test_run.id
                     )
-                    
-                    # Save Cloudinary URL and metadata
-                    test_run.screenshot_url = result['url']
-                    test_run.screenshot_public_id = result['public_id']
-                    test_run.screenshot_size_bytes = result['size_bytes']
-                    
-                    logger.info(f"Screenshot uploaded: {result['url']} ({result['size_bytes']} bytes)")
-                    
-                except ValueError as e:
-                    # Quota exceeded or upload failed
-                    test_run.logs += f"\n[Storage Error] {str(e)}"
-                    logger.warning(f"Screenshot upload failed for run {test_run.id}: {e}")
+                    test_run.screenshot_url = upload_res['url']
+                    test_run.screenshot_public_id = upload_res['public_id']
                 except Exception as e:
-                    test_run.logs += f"\n[Storage Error] Unexpected error: {str(e)}"
-                    logger.error(f"Unexpected error uploading screenshot: {e}")
-            
-            if process.returncode == 0:
+                    test_run.logs += f"\n[Storage Error] {str(e)}"
+
+            if result["returncode"] == 0:
                 test_run.status = "passed"
-                
-                # Visual AI Check (Optional)
                 if getattr(test_case, 'use_visual_ai', False) and test_run.screenshot_url:
                     self._perform_visual_ai_check(test_run, screenshot_path)
-                    
             else:
                 test_run.status = "failed"
-                test_run.error_message = f"Script exited with code {process.returncode}"
+                test_run.error_message = f"Exit code: {result['returncode']}"
 
-        except subprocess.TimeoutExpired:
-            test_run.status = "failed"
-            test_run.error_message = "Test execution timed out (60s)."
-        except Exception as e:
-            test_run.status = "error"
-            test_run.error_message = f"Execution error: {str(e)}"
         finally:
-            # Cleanup
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            if os.path.exists(screenshot_path):
-                os.remove(screenshot_path)
-            try:
-                os.rmdir(screenshot_dir)
-            except:
-                pass
-            
-            # Save test run results
+            # Cleanup temp dir
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
             test_run.save()
 
 
@@ -335,88 +436,80 @@ class RunnerService:
 
     def _run_load_test(self, test_case, test_run, override_url=None):
         """
-        Executes a Locust load test against the target endpoint.
+        Executes a Locust load test inside the sandbox.
+        Uses the locustfile.py template from the local directory.
         """
-        import subprocess
-        import json
-        import shutil
-        from urllib.parse import urlparse
-        
-        # Check if locust is installed
-        if not shutil.which("locust"):
-            test_run.status = "error" 
-            test_run.error_message = "Locust not installed on server."
-            test_run.save()
-            return
-
-        # Prepare payload for the locustfile
+        # Prepare endpoint data
         current_url = test_case.collection.url
         if override_url:
-            # Reconstruct URL with override base
+            from urllib.parse import urlparse
             orig_parsed = urlparse(current_url)
             current_url = current_url.replace(f"{orig_parsed.scheme}://{orig_parsed.netloc}", override_url.rstrip('/'))
 
         endpoint_data = {
             "method": test_case.collection.method,
-            "url": current_url, # Full URL
+            "url": current_url,
             "headers": {**test_case.collection.headers, **test_case.headers},
             "body": test_case.body or test_case.collection.request_body,
             "expected_status": test_case.expected_status
         }
         
-        # Path to our generic locustfile
-        locust_file = os.path.join(os.path.dirname(__file__), "locustfile.py")
-        
-        # Extract Base Host (Scheme + Netloc)
-        parsed = urlparse(current_url)
-        base_host = f"{parsed.scheme}://{parsed.netloc}"
-
-        # Command: locust -f locustfile.py --headless -u 10 -r 2 -t 10s --host=... --endpoint-data='{...}'
-        cmd = [
-            "locust", 
-            "-f", locust_file,
-            "--headless",
-            "--users", "5",
-            "--spawn-rate", "1",
-            "--run-time", "10s",
-            "--host", base_host, 
-            "--endpoint-data", json.dumps(endpoint_data),
-            "--csv", "locust_result", 
-        ]
-        
+        # Load the locustfile template from disk
+        locustfile_path = os.path.join(os.path.dirname(__file__), "locustfile.py")
         try:
-            start = time.time()
-            process = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd="/tmp", # Run in temp to avoid cluttering project root with logs
-                timeout=60
-            ) 
-            duration = int((time.time() - start) * 1000)
-            
-            # Locust outputs stats to stderr usually
-            logs = f"STDOUT:\n{process.stdout}\n\nSTDERR:\n{process.stderr}"
-            
-            test_run.logs = logs
-            test_run.response_time_ms = duration
-            
-            if process.returncode == 0:
-                 test_run.status = "passed"
-                 test_run.response_status = 200 # Placeholder for "Test Finished"
-            else:
-                 test_run.status = "failed"
-                 test_run.error_message = "Locust exited with error."
-                 
-        except subprocess.TimeoutExpired:
-            test_run.status = "failed" 
-            test_run.error_message = "Load test timed out."
+            with open(locustfile_path, "r") as f:
+                locust_script_template = f.read()
         except Exception as e:
-            test_run.status = "error"
-            test_run.error_message = f"Load runner failed: {e}"
-        finally:
-            # Save test run results
-            test_run.save()
+            logger.error(f"Failed to read locustfile.py template: {e}")
+            # Fallback to minimal safety script
+            locust_script_template = "from locust import HttpUser, task\nclass User(HttpUser):\n  @task\n  def t(self): pass"
+
+        # Simpler: Just use our sandbox to run a script that calls locust via subprocess
+        # We pass endpoint_data via CLI as the locustfile expects
+        endpoint_data_json = json.dumps(endpoint_data)
+        
+        wrapper_script = f"""
+import subprocess
+import sys
+import os
+import json
+
+# Write the template to the sandbox
+script_content = {repr(locust_script_template)}
+with open("locustfile.py", "w") as f:
+    f.write(script_content)
+
+endpoint_data_str = {repr(endpoint_data_json)}
+
+# Run locust with the custom argument defined in locustfile.py
+res = subprocess.run([
+    "locust", 
+    "-f", "locustfile.py", 
+    "--headless", 
+    "-u", "5", 
+    "-r", "1", 
+    "-t", "10s",
+    "--endpoint-data", endpoint_data_str
+], capture_output=True, text=True)
+
+print(res.stdout)
+print(res.stderr, file=sys.stderr)
+sys.exit(res.returncode)
+"""
+
+        result = self._run_in_sandbox(wrapper_script, timeout=30)
+        
+        test_run.logs = f"STDOUT:\n{result.get('stdout', '')}\n\nSTDERR:\n{result.get('stderr', '')}"
+        test_run.response_time_ms = result.get("duration", 0)
+        
+        if result.get("returncode") == 0:
+            test_run.status = "passed"
+            test_run.response_status = 200
+        else:
+            test_run.status = "failed"
+            test_run.error_message = result.get("error", "Locust execution failed")
+        
+        test_run.save()
 
     def _check_assertions(self, response, test_case):
         if response.status_code != test_case.expected_status:
