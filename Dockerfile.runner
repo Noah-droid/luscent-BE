@@ -5,6 +5,7 @@ WORKDIR /app
 
 # Install standard testing libraries and API server
 RUN pip install --no-cache-dir \
+    playwright \
     requests \
     locust \
     pytest \
@@ -14,8 +15,8 @@ RUN pip install --no-cache-dir \
     uvicorn
 
 # Pre-install the Chromium browser
-RUN playwright install chromium
-RUN playwright install-deps chromium
+RUN python3 -m playwright install chromium
+RUN python3 -m playwright install-deps chromium
 
 # SECURITY: Create a non-privileged user
 RUN useradd -m qairunner
