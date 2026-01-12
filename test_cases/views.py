@@ -81,6 +81,7 @@ class DraftTestPlanView(APIView):
                 'category': openapi.Schema(type=openapi.TYPE_STRING, enum=['functional', 'performance', 'security', "smoke", "regression", 'e2e']),
                 'layer': openapi.Schema(type=openapi.TYPE_STRING, enum=['backend', 'frontend']),
                 'use_visual_ai': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=False, description="Enable Visual AI analysis for generated tests"),
+                'user_story': openapi.Schema(type=openapi.TYPE_STRING, description="Optional: User Story or Requirements to guide test generation"),
                 'scenarios': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING),  
                     description="[HAPPY_PATH, VALIDATION_ERROR, AUTH_ERROR, EDGE_CASE, SECURITY]"),
             }
@@ -103,6 +104,7 @@ class DraftTestPlanView(APIView):
         layer = request.data.get("layer", "backend")
         use_visual_ai = request.data.get("use_visual_ai", False)
         scenarios = request.data.get("scenarios", []) # e.g. ["HAPPY_PATH"]
+        user_story = request.data.get("user_story", None) 
 
         # Enforce logic: Performance = Load Runner
         if category.lower() == "performance":
@@ -126,6 +128,7 @@ class DraftTestPlanView(APIView):
                 category=category,
                 layer=layer,
                 scenarios=scenarios,
+                user_story=user_story, 
             )
             return Response(draft_tests, status=status.HTTP_200_OK)
         except Exception as e:
@@ -198,6 +201,7 @@ class BatchCreateTestsView(APIView):
                         'collection_id': openapi.Schema(type=openapi.TYPE_INTEGER),
                         'test_script': openapi.Schema(type=openapi.TYPE_STRING),
                         'runner_type': openapi.Schema(type=openapi.TYPE_STRING),
+                        'user_story': openapi.Schema(type=openapi.TYPE_STRING),
                        
                     }
                 ))
@@ -235,7 +239,8 @@ class BatchCreateTestsView(APIView):
                 global_collection = get_object_or_404(Collection, id=collection_id, project__user=request.user)
             except:
                 pass 
-
+        
+        # Save user_story if present in test data
         for index, data in enumerate(test_data_list):
             try:
                 # 2. Resolve Collection (Item level overrides global)
@@ -271,7 +276,8 @@ class BatchCreateTestsView(APIView):
                     assertions=data.get("assertions", []),
                     tags=data.get("tags", []),
                     use_visual_ai=data.get("use_visual_ai", False),
-                    ai_generated=data.get("ai_generated", True) # Default to true since this flow is "Batch AI"
+                    ai_generated=data.get("ai_generated", True), # Default to true since this flow is "Batch AI"
+                    user_story=data.get("user_story", "") 
                 )
                 created_tests.append(test_case)
             except Exception as e:
@@ -289,15 +295,17 @@ class BatchCreateTestsView(APIView):
             )
             
             if can_auto_run:
+                import uuid
+                batch_id = str(uuid.uuid4())
                 for test in created_tests:
                     if HAS_CELERY:
                         try:
-                            run_test_case_task.delay(test.id)
+                            run_test_case_task.delay(test.id, batch_id=batch_id, triggered_by="manual")
                         except Exception as e:
                             logger.error(f"Failed to queue task: {e}. Falling back to sync.")
-                            RunnerService().execute_test(test.id)
+                            RunnerService().execute_test(test.id, batch_id=batch_id, triggered_by="manual")
                     else:
-                        RunnerService().execute_test(test.id)
+                        RunnerService().execute_test(test.id, batch_id=batch_id, triggered_by="manual")
             else:
                 errors.append({"error": f"Insufficient tokens for auto-run. Required: {total_auto_run_cost}, Balance: {request.user.token_balance}. Tests were created but not run."})
 
@@ -411,13 +419,21 @@ class TriggerTestRunView(APIView):
         # Enqueue runs
         run_ids = []
         if HAS_CELERY:
+            import uuid
+            batch_id = str(uuid.uuid4())
             for tc in test_cases:
-                task = run_test_case_task.delay(tc.id, override_url=target_url)
+                task = run_test_case_task.delay(
+                    tc.id, 
+                    override_url=target_url, 
+                    batch_id=batch_id, 
+                    triggered_by="webhook"
+                )
                 run_ids.append(task.id)
                 
             return Response({
                 'message': f'Queued {len(run_ids)} tests (Total Cost: {total_cost})',
-                'task_ids': run_ids
+                'task_ids': run_ids,
+                'batch_id': batch_id
             }, status=status.HTTP_202_ACCEPTED)
         else:
             return Response({'error': 'Async runner not available'}, status=status.HTTP_501_NOT_IMPLEMENTED)
@@ -429,11 +445,18 @@ class TestRunListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        test_case_id = self.kwargs["test_case_id"]
-        return TestRun.objects.filter(
-            test_case__id=test_case_id,
-            test_case__collection__project__user=self.request.user
-        ).order_by('-executed_at')
+        test_case_id = self.kwargs.get("test_case_id")
+        batch_id = self.request.query_params.get("batch_id")
+        
+        queryset = TestRun.objects.filter(test_case__collection__project__user=self.request.user)
+        
+        if test_case_id:
+            queryset = queryset.filter(test_case__id=test_case_id)
+        
+        if batch_id:
+            queryset = queryset.filter(batch_id=batch_id)
+            
+        return queryset.order_by('-executed_at')
 
 class TestRunDetailView(generics.RetrieveAPIView):
     serializer_class = TestRunSerializer
@@ -441,3 +464,118 @@ class TestRunDetailView(generics.RetrieveAPIView):
     
     def get_queryset(self):
         return TestRun.objects.filter(test_case__collection__project__user=self.request.user)
+
+
+class ProjectStatusView(APIView):
+    """
+    Returns an aggregated overview of the project's health.
+    Shows failure counts, total tests, and the latest status of each endpoint.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Get project-wide test status summary",
+        responses={200: "Health Summary JSON"}
+    )
+    def get(self, request, project_id):
+        project = get_object_or_404(Project, id=project_id, user=request.user)
+        
+        # Get all test cases for this project
+        test_cases = TestCase.objects.filter(collection__project=project)
+        
+        total_tests = test_cases.count()
+        if total_tests == 0:
+            return Response({
+                "project_name": project.name,
+                "summary": {"total": 0, "passed": 0, "failed": 0, "pass_rate": 0},
+                "endpoints": []
+            })
+
+        # Get the latest run for each test case
+        from django.db.models import OuterRef, Subquery
+        latest_run_id = TestRun.objects.filter(
+            test_case=OuterRef('pk')
+        ).order_by('-executed_at').values('id')[:1]
+
+        latest_runs = TestRun.objects.filter(id__in=Subquery(latest_run_id))
+        
+        passed_count = latest_runs.filter(status="passed").count()
+        failed_count = latest_runs.filter(status__in=["failed", "error"]).count()
+        
+        # Group by Collection (Endpoint)
+        endpoint_status = []
+        collections = Collection.objects.filter(project=project)
+        
+        for coll in collections:
+            coll_tests = test_cases.filter(collection=coll)
+            coll_runs = latest_runs.filter(test_case__in=coll_tests)
+            
+            coll_failed = coll_runs.filter(status__in=["failed", "error"]).count()
+            
+            endpoint_status.append({
+                "id": coll.id,
+                "name": coll.name,
+                "method": coll.method,
+                "url": coll.url,
+                "total_tests": coll_tests.count(),
+                "failed_tests": coll_failed,
+                "status": "failing" if coll_failed > 0 else "passing" if coll_runs.exists() else "no_runs"
+            })
+
+        return Response({
+            "project_name": project.name,
+            "summary": {
+                "total": total_tests,
+                "passed": passed_count,
+                "failed": failed_count,
+                "pass_rate": round((passed_count / total_tests) * 100, 2) if total_tests > 0 else 0
+            },
+            "endpoints": endpoint_status
+        })
+
+
+class ProjectAutoPilotView(APIView):
+    """
+    Triggers AI generation and execution for all endpoints in a project.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Trigger AI Auto-Pilot for an entire project",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'scenarios': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING), 
+                    description="Standard scenarios to generate for each endpoint (e.g. ['HAPPY_PATH'])"),
+                'user_story': openapi.Schema(type=openapi.TYPE_STRING, description="Optional: Context or requirements that apply to all endpoints in this batch")
+            }
+        ),
+        responses={202: "Auto-Pilot started"}
+    )
+    def post(self, request, project_id):
+        project = get_object_or_404(Project, id=project_id, user=request.user)
+        scenarios = request.data.get("scenarios", ["HAPPY_PATH", "VALIDATION_ERROR", "SECURITY"])
+        user_story = request.data.get("user_story", "")
+        
+        if not HAS_CELERY:
+            return Response({"error": "Auto-Pilot requires Celery for background processing."}, status=501)
+
+        import uuid
+        batch_id = uuid.uuid4()
+        
+   
+        from .tasks import project_auto_pilot_task
+        
+        project_auto_pilot_task.delay(
+            project_id=str(project.id),
+            user_id=request.user.id,
+            scenarios=scenarios,
+            batch_id=str(batch_id),
+            user_story=user_story
+        )
+
+        return Response({
+            "message": "Auto-Pilot started successfully",
+            "batch_id": batch_id,
+            "description": f"Generating and running tests for all endpoints in {project.name}."
+        }, status=status.HTTP_202_ACCEPTED)
