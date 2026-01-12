@@ -54,6 +54,7 @@ class TestCase(models.Model):
 
     priority = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default="medium")
     tags = models.JSONField(default=list, blank=True, help_text="e.g. ['SCENARIO:HAPPY_PATH', 'CRITICAL']")
+    user_story = models.TextField(blank=True, null=True, help_text="User story/requirements context used to generate this test")
     ai_generated = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -135,6 +136,8 @@ class TestRun(models.Model):
     screenshot_size_bytes = models.IntegerField(default=0, help_text="File size for quota tracking")
     
     executed_at = models.DateTimeField(auto_now_add=True)
+    batch_id = models.UUIDField(null=True, blank=True, db_index=True, help_text="Group ID for batch executions")
+    triggered_by = models.CharField(max_length=50, choices=[("manual", "Manual"), ("ai", "AI Auto-Pilot"), ("webhook", "Webhook")], default="manual")
     
     def __str__(self):
         return f"Run {self.id} for {self.test_case.name} - {self.status}"
