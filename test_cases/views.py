@@ -508,10 +508,32 @@ class ProjectStatusView(APIView):
         
         for coll in collections:
             coll_tests = test_cases.filter(collection=coll)
-            coll_runs = latest_runs.filter(test_case__in=coll_tests)
             
-            coll_failed = coll_runs.filter(status__in=["failed", "error"]).count()
+            tests_list = []
+            coll_failed = 0
+            has_runs = False
             
+            for test in coll_tests:
+                # Get the latest run for this specific test from our pre-fetched latest_runs
+                latest_run = latest_runs.filter(test_case=test).first()
+                
+                run_status = "no_runs"
+                if latest_run:
+                    run_status = latest_run.status
+                    has_runs = True
+                    if run_status in ["failed", "error"]:
+                        coll_failed += 1
+                
+                tests_list.append({
+                    "id": test.id,
+                    "name": test.name,
+                    "status": run_status,
+                    "last_run_id": latest_run.id if latest_run else None,
+                    "last_run_at": latest_run.executed_at if latest_run else None,
+                    "category": test.category,
+                    "priority": test.priority
+                })
+
             endpoint_status.append({
                 "id": coll.id,
                 "name": coll.name,
@@ -519,11 +541,13 @@ class ProjectStatusView(APIView):
                 "url": coll.url,
                 "total_tests": coll_tests.count(),
                 "failed_tests": coll_failed,
-                "status": "failing" if coll_failed > 0 else "passing" if coll_runs.exists() else "no_runs"
+                "status": "failing" if coll_failed > 0 else "passing" if has_runs else "no_runs",
+                "tests": tests_list
             })
 
         return Response({
             "project_name": project.name,
+            "project_id": str(project.id),
             "summary": {
                 "total": total_tests,
                 "passed": passed_count,
