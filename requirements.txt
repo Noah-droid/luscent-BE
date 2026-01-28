@@ -17,7 +17,7 @@ cloudinary==1.44.1
 ConfigArgParse==1.7.1
 cryptography==46.0.3
 dj-database-url==3.0.1
-Django==6.0
+Django==5.2.8
 django-cors-headers==4.9.0
 django-encrypted-model-fields==0.6.5
 django-fernet-encrypted-fields==0.3.1
