@@ -1,0 +1,35 @@
+FROM python:3.11-slim
+
+# Set environment variables
+# PYTHONDONTWRITEBYTECODE: Prevents Python from writing .pyc files to disk
+# PYTHONUNBUFFERED: Ensures console output is sent straight to logs without buffering
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Install system dependencies
+# build-essential: Needed for some python packages that compile C extensions
+# libpq-dev: Header files for PostgreSQL (even if using psycopg2-binary, it's safer)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set the working directory in the container
+WORKDIR /app
+
+# Install Python dependencies
+# We copy requirements.txt first to leverage Docker cache
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application code
+COPY . .
+
+# SECURITY: Create a non-root user to run the process
+RUN useradd -m celeryuser && \
+    chown -R celeryuser:celeryuser /app
+USER celeryuser
+
+
+
+CMD ["celery", "-A", "config", "worker", "--loglevel=info", "--concurrency=2"]

@@ -1,8 +1,18 @@
-# Ignore everything by default
-*
+# Exclude common dev artifacts
+__pycache__/
+*.pyc
+.git/
+.env
+db.sqlite3
+env/
+venv/
+.vscode/
+.idea/
 
-# Allow only explicit build dependencies
-!runner_api.py
-!Dockerfile.runner
-!test_cases/
-!test_cases/locustfile.py
+# Common ignore patterns
+*.log
+*.pot
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
