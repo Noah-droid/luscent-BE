@@ -11,6 +11,8 @@ from .openapi_parser import (
 )
 from .crawler import crawl_url
 import traceback
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 
 
 
@@ -61,6 +63,37 @@ class CollectionDetailView(generics.RetrieveUpdateDestroyAPIView):
 class SwaggerImportView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_description="Import endpoints from a Swagger/OpenAPI specification",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'swagger_url': openapi.Schema(type=openapi.TYPE_STRING, description="URL to the Swagger/OpenAPI JSON or YAML file"),
+                'file': openapi.Schema(type=openapi.TYPE_FILE, description="Swagger/OpenAPI file to upload"),
+                'async': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=True, description="Run the import in the background"),
+                'skip_validation': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=False, description="Skip strict OpenAPI spec validation")
+            }
+        ),
+        responses={
+            201: openapi.Response("Imported", openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'imported': openapi.Schema(type=openapi.TYPE_INTEGER),
+                    'skipped': openapi.Schema(type=openapi.TYPE_INTEGER),
+                    'errors': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING))
+                }
+            )),
+            202: openapi.Response("Queued", openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'message': openapi.Schema(type=openapi.TYPE_STRING),
+                    'task_id': openapi.Schema(type=openapi.TYPE_STRING)
+                }
+            )),
+            400: "Invalid Input",
+            404: "Project not found"
+        }
+    )
     def post(self, request, project_id):
         """
         POST payload: form-data or JSON
@@ -73,6 +106,7 @@ class SwaggerImportView(APIView):
         swagger_url = request.data.get("swagger_url")
         swagger_file = request.FILES.get("file")
         run_async = request.data.get("async", True) and HAS_CELERY
+        skip_validation = request.data.get("skip_validation", False)
 
         if not swagger_url and not swagger_file:
             return Response({"error": "Provide swagger_url or upload a file."}, status=status.HTTP_400_BAD_REQUEST)
@@ -82,7 +116,7 @@ class SwaggerImportView(APIView):
 
         if run_async:
             # queue a background task
-            task = import_swagger_task.delay(project.id, swagger_url)
+            task = import_swagger_task.delay(project.id, swagger_url, skip_validation=skip_validation)
             return Response({"message": "Swagger import queued", "task_id": task.id}, status=status.HTTP_202_ACCEPTED)
 
         # synchronous path: fetch/parse/run immediately
@@ -94,9 +128,10 @@ class SwaggerImportView(APIView):
 
             spec = load_spec_from_text(raw_text)
 
-            valid, validation_error = validate_openapi(spec)
-            if not valid:
-                return Response({"error": "Spec validation failed", "detail": validation_error}, status=status.HTTP_400_BAD_REQUEST)
+            if not skip_validation:
+                valid, validation_error = validate_openapi(spec)
+                if not valid:
+                    return Response({"error": "Spec validation failed", "detail": validation_error}, status=status.HTTP_400_BAD_REQUEST)
 
             # Pass None as default_base_url since project doesn't have it anymore
             parse_result = parse_paths_to_endpoints(spec, project_obj=project, default_base_url=None)
@@ -141,6 +176,37 @@ class SwaggerImportView(APIView):
 class CrawlerImportView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_description="Crawl a website to discover endpoints and import them",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['url'],
+            properties={
+                'url': openapi.Schema(type=openapi.TYPE_STRING, description="Start URL for the crawler"),
+                'max_pages': openapi.Schema(type=openapi.TYPE_INTEGER, default=50, description="Maximum number of pages to crawl"),
+                'async': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=True, description="Run the crawler in the background")
+            }
+        ),
+        responses={
+            201: openapi.Response("Crawler Finished", openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'imported': openapi.Schema(type=openapi.TYPE_INTEGER),
+                    'found': openapi.Schema(type=openapi.TYPE_INTEGER),
+                    'errors': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING))
+                }
+            )),
+            202: openapi.Response("Crawler Started", openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'message': openapi.Schema(type=openapi.TYPE_STRING),
+                    'task_id': openapi.Schema(type=openapi.TYPE_STRING)
+                }
+            )),
+            400: "Invalid Input",
+            404: "Project not found"
+        }
+    )
     def post(self, request, project_id):
         """
         POST payload:
