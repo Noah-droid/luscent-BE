@@ -50,7 +50,7 @@ class RunnerService:
             
             # Increment lifetime stat
             try:
-                test_case.collection.project.user.increment_test_runs()
+                test_case.endpoint.collection.project.user.increment_test_runs()
             except Exception as e:
                 logger.error(f"Failed to increment test_runs_count: {e}")
             
@@ -81,15 +81,15 @@ class RunnerService:
         from .security import require_safe_url, URLSecurityError
         from django.conf import settings
         
-        collection = test_case.collection
+        endpoint = test_case.endpoint
         
         # URL Resolution
         if override_url:
             from urllib.parse import urlparse
-            orig_parsed = urlparse(collection.url)
-            full_url = collection.url.replace(f"{orig_parsed.scheme}://{orig_parsed.netloc}", override_url.rstrip('/'))
+            orig_parsed = urlparse(endpoint.url)
+            full_url = endpoint.url.replace(f"{orig_parsed.scheme}://{orig_parsed.netloc}", override_url.rstrip('/'))
         else:
-            full_url = collection.url
+            full_url = endpoint.url
 
         # SECURITY: Validate URL on host before sending to sandbox
         try:
@@ -102,14 +102,14 @@ class RunnerService:
             return
         
         # Prepare data for the sandbox script
-        headers = {**collection.headers, **test_case.headers}
-        if collection.auth_type == "bearer":
-             headers["Authorization"] = f"Bearer {collection.auth_value}"
-        elif collection.auth_type == "api_key":
-             headers["X-API-Key"] = collection.auth_value
+        headers = {**endpoint.headers, **test_case.headers}
+        if endpoint.auth_type == "bearer":
+             headers["Authorization"] = f"Bearer {endpoint.auth_value}"
+        elif endpoint.auth_type == "api_key":
+             headers["X-API-Key"] = endpoint.auth_value
 
-        params = {**collection.query_params, **test_case.query_params}
-        body = test_case.body if test_case.body else collection.request_body
+        params = {**endpoint.query_params, **test_case.query_params}
+        body = test_case.body if test_case.body else endpoint.request_body
         
         # Generate the execution script
         # JSON serialization 
@@ -121,7 +121,7 @@ class RunnerService:
         try:
             start_time = time.time()
             resp = requests.request(
-                method="{collection.method.upper()}",
+                method="{endpoint.method.upper()}",
                 url="{full_url}",
                 headers={json.dumps(headers)},
                 params={json.dumps(params)},
@@ -375,7 +375,7 @@ class RunnerService:
                     storage = CloudinaryStorage()
                     upload_res = storage.upload_screenshot(
                         file_path=screenshot_path,
-                        project=test_case.collection.project,
+                        project=test_case.endpoint.collection.project,
                         test_run_id=test_run.id
                     )
                     test_run.screenshot_url = upload_res['url']
@@ -440,17 +440,17 @@ class RunnerService:
         Uses the locustfile.py template from the local directory.
         """
         # Prepare endpoint data
-        current_url = test_case.collection.url
+        current_url = test_case.endpoint.url
         if override_url:
             from urllib.parse import urlparse
             orig_parsed = urlparse(current_url)
             current_url = current_url.replace(f"{orig_parsed.scheme}://{orig_parsed.netloc}", override_url.rstrip('/'))
 
         endpoint_data = {
-            "method": test_case.collection.method,
+            "method": test_case.endpoint.method,
             "url": current_url,
-            "headers": {**test_case.collection.headers, **test_case.headers},
-            "body": test_case.body or test_case.collection.request_body,
+            "headers": {**test_case.endpoint.headers, **test_case.headers},
+            "body": test_case.body or test_case.endpoint.request_body,
             "expected_status": test_case.expected_status
         }
         
