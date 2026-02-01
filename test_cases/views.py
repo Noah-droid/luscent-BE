@@ -4,7 +4,7 @@ from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from django.utils.decorators import method_decorator
 from django_ratelimit.decorators import ratelimit
-from collection.models import Collection
+from collection.models import Endpoint
 from projects.models import Project
 from .models import TestCase, TestRun
 from .serializers import TestCaseSerializer, TestRunSerializer
@@ -93,11 +93,11 @@ class DraftTestPlanView(APIView):
     )
     @method_decorator(ratelimit(key='user', rate='2/h', method='POST'))
     def post(self, request):
-        collection_id = request.data.get("collection")
-        if not collection_id:
-            return Response({"error": "collection_id required"}, status=400)
+        endpoint_id = request.data.get("endpoint") or request.data.get("collection") # Support legacy key
+        if not endpoint_id:
+            return Response({"error": "endpoint_id required"}, status=400)
 
-        collection_item = get_object_or_404(Collection, id=collection_id, project__user=request.user)
+        endpoint_item = get_object_or_404(Endpoint, id=endpoint_id, collection__project__user=request.user)
         
         runner_type = request.data.get("runner_type", "http")
         category = request.data.get("category", "functional")
@@ -113,22 +113,28 @@ class DraftTestPlanView(APIView):
         # Billing: Deduct 5 Tokens for AI Generation
         from billing.services import deduct_tokens
         COST = 5
-        if not deduct_tokens(request.user, COST, f"AI Generation: {collection_item.name}"):
+        if not deduct_tokens(request.user, COST, f"AI Generation: {endpoint_item.name}"):
              return Response(
                  {"error": f"Insufficient tokens. Required: {COST}, Balance: {request.user.token_balance}"}, 
                  status=402 # Payment Required
              )
 
+        # 1. Fetch Swagger/OpenAPI spec context if available
+        spec_context = ""
+        # We can look up the collection's shared base_url or endpoints
+        project_desc = endpoint_item.collection.project.description or ""
+        
         generator = AITestGenerator()
         try:
             # Call AI
-            draft_tests = generator.generate_tests(
-                collection_item, 
+            draft_tests = generator.generate_draft_plan(
+                endpoint_item, 
+                scenarios=scenarios,
                 runner_type=runner_type,
                 category=category,
                 layer=layer,
-                scenarios=scenarios,
-                user_story=user_story, 
+                project_description=project_desc,
+                user_story=user_story
             )
             return Response(draft_tests, status=status.HTTP_200_OK)
         except Exception as e:
@@ -212,11 +218,11 @@ class BatchCreateTestsView(APIView):
         }
     )
     def post(self, request):
-        # Expecting structure: { "collection_id": 1, "auto_run": true, "tests": [...] }
+        # Expecting structure: { "endpoint_id": 1, "auto_run": true, "tests": [...] }
         payload = request.data
         
         # 1. Parse Root Params
-        collection_id = payload.get("collection_id") or request.data.get("collection")
+        endpoint_id = payload.get("endpoint_id") or payload.get("endpoint") or payload.get("collection_id") or payload.get("collection")
         should_auto_run = payload.get("auto_run", True) # Default to True
         test_data_list = payload.get("tests", [])
 
@@ -232,36 +238,36 @@ class BatchCreateTestsView(APIView):
         created_tests = []
         errors = []
         
-        # Resolve Collection Context globally if provided
-        global_collection = None
-        if collection_id:
+        # Resolve Endpoint Context globally if provided
+        global_endpoint = None
+        if endpoint_id:
             try:
-                global_collection = get_object_or_404(Collection, id=collection_id, project__user=request.user)
+                global_endpoint = get_object_or_404(Endpoint, id=endpoint_id, collection__project__user=request.user)
             except:
                 pass 
         
         # Save user_story if present in test data
         for index, data in enumerate(test_data_list):
             try:
-                # 2. Resolve Collection (Item level overrides global)
-                collection = global_collection
-                c_id = data.get("collection") or data.get("collection_id")
+                # 2. Resolve Endpoint (Item level overrides global)
+                endpoint = global_endpoint
+                e_id = data.get("endpoint") or data.get("endpoint_id") or data.get("collection") or data.get("collection_id")
                 
-                if c_id:
-                     # If item specifies different collection, look it up
+                if e_id:
+                     # If item specifies different endpoint, look it up
                      try:
-                         collection = Collection.objects.get(id=c_id, project__user=request.user)
-                     except Collection.DoesNotExist:
-                         errors.append({"index": index, "error": f"Collection {c_id} not found"})
+                         endpoint = Endpoint.objects.get(id=e_id, collection__project__user=request.user)
+                     except Endpoint.DoesNotExist:
+                         errors.append({"index": index, "error": f"Endpoint {e_id} not found"})
                          continue
                 
-                if not collection:
-                     errors.append({"index": index, "error": "Missing collection_id (global or item level)"})
+                if not endpoint:
+                     errors.append({"index": index, "error": "Missing endpoint_id (global or item level)"})
                      continue
 
 
                 test_case = TestCase.objects.create(
-                    collection=collection,
+                    endpoint=endpoint,
                     name=data.get("name", f"Test {index}"),
                     description=data.get("description", ""),
                     priority=data.get("priority", "medium").lower(),

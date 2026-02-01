@@ -1,101 +1,103 @@
 from celery import shared_task
 from django.shortcuts import get_object_or_404
-from .models import Project
-from .openapi_parser import fetch_spec_from_url, load_spec_from_text, validate_openapi, parse_paths_to_endpoints
-from .models import Collection
+from projects.models import Project
+from .models import Collection, Endpoint
+from .openapi_parser import (
+    fetch_spec_from_url, load_spec_from_text, validate_openapi, 
+    parse_paths_to_endpoints, extract_base_url
+)
 import logging
+import traceback
 
 logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, soft_time_limit=120)
-def import_swagger_task(self, project_id, swagger_url=None):
+def import_swagger_task(self, project_id, swagger_url, collection_name=None, skip_validation=False):
     """
-    Celery task to fetch and import swagger spec into endpoints.
-    swagger_url may be None if file upload path is used (we don't queue files via celery in this pattern).
+    Celery task to fetch and import swagger spec into a new collection.
     """
     project = get_object_or_404(Project, id=project_id)
-    if not swagger_url:
-        return {"error": "No swagger_url provided to task."}
+    if not collection_name:
+        collection_name = f"Swagger Import - {swagger_url[:30]}"
 
     try:
         raw_text = fetch_spec_from_url(swagger_url)
         spec = load_spec_from_text(raw_text)
-        valid, validation_error = validate_openapi(spec)
-        if not valid:
-            return {"error": "Spec validation failed", "detail": validation_error}
+        
+        if not skip_validation:
+            valid, validation_error = validate_openapi(spec)
+            if not valid:
+                return {"error": "Spec validation failed", "detail": validation_error}
 
-        parse_result = parse_paths_to_endpoints(spec, project_obj=project, default_base_url=project.base_url)
-        created, skipped, errors = 0, parse_result.get("skipped", 0), parse_result.get("errors", [])
+        # Create Collection
+        coll = Collection.objects.create(
+            project=project, 
+            name=collection_name, 
+            source="swagger",
+            base_url=extract_base_url(spec)
+        )
+
+        parse_result = parse_paths_to_endpoints(spec, project_obj=project)
+        created, errors = 0, parse_result.get("errors", [])
         endpoints = parse_result.get("endpoints", [])
 
         for e in endpoints:
             try:
-                endpoint_obj, created_flag = Collection.objects.get_or_create(
-                    project=project,
+                Endpoint.objects.create(
+                    collection=coll,
                     method=e["method"],
-                    path=e["path"],
-                    defaults={
-                        "name": e["name"],
-                        "query_params": {},
-                        "headers": {},
-                        "request_body": e.get("requestBody") or {},
-                        "description": e.get("description", "")
-                    }
+                    url=e["full_url"] or e["path"],
+                    name=e["name"],
+                    description=e.get("description", ""),
+                    request_body=e.get("requestBody") or {}
                 )
-                if created_flag:
-                    created += 1
+                created += 1
             except Exception as ee:
-                errors.append(f"DB create error for {e['method']} {e['path']}: {str(ee)}")
+                errors.append(f"DB error for {e.get('method')} {e.get('path')}: {str(ee)}")
 
-        result = {"imported": created, "skipped": skipped, "errors": errors}
-        logger.info("Swagger import finished for project %s: %s", project_id, result)
-        return result
+        return {"imported": created, "errors": errors, "collection_id": coll.id}
 
     except Exception as exc:
-        logger.exception("Swagger import failed for project %s", project_id)
+        logger.exception("Swagger import failed")
         return {"error": str(exc)}
 
 
 @shared_task(bind=True, soft_time_limit=300)
-def import_crawler_task(self, project_id, start_url, max_pages=50):
+def import_crawler_task(self, project_id, start_url, collection_name=None, max_pages=50):
     """
-    Celery task to crawl a website and import found endpoints (pages).
+    Celery task to crawl a website and import found endpoints into a collection.
     """
-    from .crawler import crawl_url  # local import
-
+    from .crawler import crawl_url
     project = get_object_or_404(Project, id=project_id)
-    if not start_url:
-        return {"error": "No start_url provided."}
+    if not collection_name:
+        collection_name = f"Crawler Import - {start_url}"
 
     try:
         endpoints = crawl_url(start_url, max_pages=max_pages)
-        created_count = 0
-        errors = []
+        
+        coll = Collection.objects.create(
+            project=project, 
+            name=collection_name, 
+            source="crawler",
+            base_url=start_url
+        )
 
+        created_count = 0
         for e in endpoints:
             try:
-                # Basic get_or_create
-                # We set source="crawler"
-                obj, created = Collection.objects.get_or_create(
-                    project=project,
+                Endpoint.objects.create(
+                    collection=coll,
                     method=e["method"],
-                    path=e["path"],
-                    defaults={
-                        "name": e["name"],
-                        "description": e.get("description", ""),
-                        "source": "crawler"
-                    }
+                    url=e["full_url"],
+                    name=e["name"],
+                    description=e.get("description", "")
                 )
-                if created:
-                    created_count += 1
-            except Exception as ee:
-                errors.append(f"Error saving {e['path']}: {str(ee)}")
+                created_count += 1
+            except Exception:
+                pass
 
-        result = {"imported": created_count, "found": len(endpoints), "errors": errors}
-        logger.info("Crawler finished for project %s: %s", project_id, result)
-        return result
+        return {"imported": created_count, "collection_id": coll.id}
 
     except Exception as exc:
-        logger.exception("Crawler failed for project %s", project_id)
+        logger.exception("Crawler failed")
         return {"error": str(exc)}
-

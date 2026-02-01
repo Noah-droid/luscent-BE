@@ -5,7 +5,6 @@ from urllib.parse import urljoin
 import requests
 from openapi_spec_validator import validate_spec
 
-from openapi_spec_validator import exceptions as oas_exceptions
 
 
 logger = logging.getLogger(__name__)
@@ -38,9 +37,9 @@ def validate_openapi(spec_dict):
     try:
         validate_spec(spec_dict)
         return True, None
-    except oas_exceptions.OpenAPIValidationError as e:
-        return False, str(e)
     except Exception as e:
+        # Catching everything because openapi_spec_validator exceptions 
+        # hierarchy is inconsistent across versions.
         return False, str(e)
 
 

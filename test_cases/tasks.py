@@ -67,51 +67,51 @@ def project_auto_pilot_task(project_id, user_id, scenarios, batch_id, user_story
     final_story = user_story or project.description or ""
     
     for coll in collections:
-        # Check if user has already generated tests for this today or keep it simple
-        # For now, let's just generate the suite.
-        
-        # 1. Billing check for AI
-        AI_COST = 5
-        if not deduct_tokens(user, AI_COST, f"Auto-Pilot Gen: {coll.name}"):
-            logger.warning(f"Insufficient tokens for Auto-Pilot on {coll.name}")
-            continue
+        # Auto-Pilot for each endpoint in the collection
+        endpoints = coll.endpoints.all()
+        for endpoint in endpoints:
+            # 1. Billing check for AI
+            AI_COST = 5
+            if not deduct_tokens(user, AI_COST, f"Auto-Pilot Gen: {endpoint.name}"):
+                logger.warning(f"Insufficient tokens for Auto-Pilot on {endpoint.name}")
+                continue
 
-        # 2. Call AI
-        draft_tests = generator.generate_tests(
-            coll,
-            scenarios=scenarios,
-            user_story=final_story
-        )
-        
-        # 3. Save Tests & Trigger Runs
-        for data in draft_tests:
-            try:
-                test_case = TestCase.objects.create(
-                    collection=coll,
-                    name=data.get("name"),
-                    description=data.get("description"),
-                    priority=data.get("priority", "medium").lower(),
-                    category=data.get("category", "functional"),
-                    layer=data.get("layer", "backend"),
-                    runner_type=data.get("runner_type", "http"),
-                    test_script=data.get("test_script"),
-                    headers=data.get("headers", {}),
-                    query_params=data.get("query_params", {}),
-                    body=data.get("body", {}),
-                    expected_status=data.get("expected_status", 200),
-                    assertions=data.get("assertions", []),
-                    tags=data.get("tags", []),
-                    ai_generated=True,
-                    user_story=data.get("user_story", final_story)
-                )
-                
-                # 4. Trigger Run (Immediate Queue)
-                RUN_COST = calculate_test_cost(test_case.runner_type)
-                if deduct_tokens(user, RUN_COST, f"Auto-Pilot Run: {test_case.name}"):
-                    run_test_case_task.delay(
-                        test_case.id, 
-                        batch_id=batch_id, 
-                        triggered_by="ai"
+            # 2. Call AI
+            draft_tests = generator.generate_draft_plan(
+                endpoint,
+                scenarios=scenarios,
+                user_story=final_story
+            )
+            
+            # 3. Save Tests & Trigger Runs
+            for data in draft_tests:
+                try:
+                    test_case = TestCase.objects.create(
+                        endpoint=endpoint,
+                        name=data.get("name"),
+                        description=data.get("description"),
+                        priority=data.get("priority", "medium").lower(),
+                        category=data.get("category", "functional"),
+                        layer=data.get("layer", "backend"),
+                        runner_type=data.get("runner_type", "http"),
+                        test_script=data.get("test_script"),
+                        headers=data.get("headers", {}),
+                        query_params=data.get("query_params", {}),
+                        body=data.get("body", {}),
+                        expected_status=data.get("expected_status", 200),
+                        assertions=data.get("assertions", []),
+                        tags=data.get("tags", []),
+                        ai_generated=True,
+                        user_story=data.get("user_story", final_story)
                     )
-            except Exception as e:
-                logger.error(f"Auto-Pilot failed to create/run test: {e}")
+                    
+                    # 4. Trigger Run (Immediate Queue)
+                    RUN_COST = calculate_test_cost(test_case.runner_type)
+                    if deduct_tokens(user, RUN_COST, f"Auto-Pilot Run: {test_case.name}"):
+                        run_test_case_task.delay(
+                            test_case.id, 
+                            batch_id=batch_id, 
+                            triggered_by="ai"
+                        )
+                except Exception as e:
+                    logger.error(f"Auto-Pilot failed to create/run test for {endpoint.name}: {e}")

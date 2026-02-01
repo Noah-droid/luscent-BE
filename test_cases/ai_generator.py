@@ -18,9 +18,9 @@ class AITestGenerator:
         self.max_tokens = 8192 
         self.temperature = 0.7
 
-    def generate_tests(self, collection_item, runner_type="http", category="functional", layer="backend", scenarios=None, user_story=None):
+    def generate_draft_plan(self, endpoint_item, runner_type="http", category="functional", layer="backend", scenarios=None, project_description="", user_story=None):
         """
-        Generate test cases for a given Collection (endpoint) object.
+        Generate test case drafts for a given Endpoint (url/method) object.
         Returns a list of dicts suitable for creating TestCase objects.
         """
         api_key = self.openai_api_key if self.provider == "openai" else self.gemini_api_key
@@ -29,7 +29,7 @@ class AITestGenerator:
             logger.warning(f"No API key found for provider {self.provider}. Skipping AI generation.")
             return []
 
-        prompt = self._construct_prompt(collection_item, runner_type, category, layer, scenarios, user_story)
+        prompt = self._construct_prompt(endpoint_item, runner_type, category, layer, scenarios, project_description, user_story)
         
         try:
             response = self._call_llm(prompt)
@@ -51,13 +51,13 @@ class AITestGenerator:
         if not api_key: return None
 
         context_block = ""
-        if collection_item:
+        if endpoint_item:
             context = {
-                "method": collection_item.method,
-                "url": collection_item.url,
-                "description": collection_item.description,
-                "request_body_schema": collection_item.request_body,
-                "query_params": collection_item.query_params,
+                "method": endpoint_item.method,
+                "url": endpoint_item.url,
+                "description": endpoint_item.description,
+                "request_body_schema": endpoint_item.request_body,
+                "query_params": endpoint_item.query_params,
             }
             context_block = f"CONTEXT (The API Endpoint being tested):\n{json.dumps(context, indent=2)}\n"
 
@@ -88,7 +88,7 @@ class AITestGenerator:
             logger.error(f"Refinement failed: {e}")
             raise e
 
-    def _construct_prompt(self, item, runner_type, category, layer, scenarios, user_story=None):
+    def _construct_prompt(self, item, runner_type, category, layer, scenarios, project_description="", user_story=None):
         # Build context about the endpoint
         context = {
             "method": item.method,
@@ -100,8 +100,8 @@ class AITestGenerator:
         
         # Inject Project Variables if available
         project_vars = {}
-        if hasattr(item.project, 'environment_variables') and item.project.environment_variables:
-             project_vars = item.project.environment_variables
+        if hasattr(item.collection.project, 'environment_variables') and item.collection.project.environment_variables:
+             project_vars = item.collection.project.environment_variables
 
         # Format requested scenarios for the prompt
         scenario_instruction = ""
