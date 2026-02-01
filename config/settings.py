@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'test_cases',
     'billing',
     'encrypted_model_fields',
+    # 'remote_runners',
 ]
 
 # Custom user model
