@@ -452,12 +452,20 @@ class TestRunListView(generics.ListAPIView):
 
     def get_queryset(self):
         test_case_id = self.kwargs.get("test_case_id")
+        endpoint_id = self.request.query_params.get("endpoint_id")
+        collection_id = self.request.query_params.get("collection_id")
         batch_id = self.request.query_params.get("batch_id")
         
-        queryset = TestRun.objects.filter(test_case__collection__project__user=self.request.user)
+        queryset = TestRun.objects.filter(test_case__endpoint__collection__project__user=self.request.user)
         
         if test_case_id:
             queryset = queryset.filter(test_case__id=test_case_id)
+        
+        if endpoint_id:
+            queryset = queryset.filter(test_case__endpoint__id=endpoint_id)
+        
+        if collection_id:
+            queryset = queryset.filter(test_case__endpoint__collection__id=collection_id)
         
         if batch_id:
             queryset = queryset.filter(batch_id=batch_id)
@@ -487,7 +495,7 @@ class ProjectStatusView(APIView):
         project = get_object_or_404(Project, id=project_id, user=request.user)
         
         # Get all test cases for this project
-        test_cases = TestCase.objects.filter(collection__project=project)
+        test_cases = TestCase.objects.filter(endpoint__collection__project=project)
         
         total_tests = test_cases.count()
         if total_tests == 0:
@@ -508,18 +516,19 @@ class ProjectStatusView(APIView):
         passed_count = latest_runs.filter(status="passed").count()
         failed_count = latest_runs.filter(status__in=["failed", "error"]).count()
         
-        # Group by Collection (Endpoint)
+        # Group by Endpoint
+        from collection.models import Endpoint
         endpoint_status = []
-        collections = Collection.objects.filter(project=project)
+        endpoints = Endpoint.objects.filter(collection__project=project)
         
-        for coll in collections:
-            coll_tests = test_cases.filter(collection=coll)
+        for endpoint in endpoints:
+            endpoint_tests = test_cases.filter(endpoint=endpoint)
             
             tests_list = []
-            coll_failed = 0
+            endpoint_failed = 0
             has_runs = False
             
-            for test in coll_tests:
+            for test in endpoint_tests:
                 # Get the latest run for this specific test from our pre-fetched latest_runs
                 latest_run = latest_runs.filter(test_case=test).first()
                 
@@ -528,7 +537,7 @@ class ProjectStatusView(APIView):
                     run_status = latest_run.status
                     has_runs = True
                     if run_status in ["failed", "error"]:
-                        coll_failed += 1
+                        endpoint_failed += 1
                 
                 tests_list.append({
                     "id": test.id,
@@ -541,13 +550,15 @@ class ProjectStatusView(APIView):
                 })
 
             endpoint_status.append({
-                "id": coll.id,
-                "name": coll.name,
-                "method": coll.method,
-                "url": coll.url,
-                "total_tests": coll_tests.count(),
-                "failed_tests": coll_failed,
-                "status": "failing" if coll_failed > 0 else "passing" if has_runs else "no_runs",
+                "id": endpoint.id,
+                "name": endpoint.name,
+                "method": endpoint.method,
+                "url": endpoint.url,
+                "collection_id": endpoint.collection.id,
+                "collection_name": endpoint.collection.name,
+                "total_tests": endpoint_tests.count(),
+                "failed_tests": endpoint_failed,
+                "status": "failing" if endpoint_failed > 0 else "passing" if has_runs else "no_runs",
                 "tests": tests_list
             })
 
@@ -609,3 +620,150 @@ class ProjectAutoPilotView(APIView):
             "batch_id": batch_id,
             "description": f"Generating and running tests for all endpoints in {project.name}."
         }, status=status.HTTP_202_ACCEPTED)
+
+
+class CollectionAutoPilotView(APIView):
+    """
+    Triggers AI generation and execution for all endpoints in a specific collection.
+    More granular than project-level auto-pilot.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Trigger AI Auto-Pilot for a specific collection",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'scenarios': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING), 
+                    description="Standard scenarios to generate for each endpoint (e.g. ['HAPPY_PATH'])"),
+                'user_story': openapi.Schema(type=openapi.TYPE_STRING, description="Optional: Context or requirements for this collection")
+            }
+        ),
+        responses={202: "Auto-Pilot started"}
+    )
+    def post(self, request, collection_id):
+        from collection.models import Collection
+        collection = get_object_or_404(Collection, id=collection_id, project__user=request.user)
+        
+        scenarios = request.data.get("scenarios", ["HAPPY_PATH", "VALIDATION_ERROR", "SECURITY"])
+        user_story = request.data.get("user_story", "")
+        
+        if not HAS_CELERY:
+            return Response({"error": "Auto-Pilot requires Celery for background processing."}, status=501)
+
+        import uuid
+        batch_id = uuid.uuid4()
+        
+        from .tasks import collection_auto_pilot_task
+        
+        collection_auto_pilot_task.delay(
+            collection_id=str(collection.id),
+            user_id=request.user.id,
+            scenarios=scenarios,
+            batch_id=str(batch_id),
+            user_story=user_story
+        )
+
+        return Response({
+            "message": "Collection Auto-Pilot started successfully",
+            "batch_id": batch_id,
+            "description": f"Generating and running tests for all endpoints in collection '{collection.name}'."
+        }, status=status.HTTP_202_ACCEPTED)
+
+
+class CollectionStatusView(APIView):
+    """
+    Returns status summary for a specific collection.
+    Shows all endpoints in the collection and their test results.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Get collection-level test status summary",
+        responses={200: "Collection Health Summary JSON"}
+    )
+    def get(self, request, collection_id):
+        from collection.models import Collection, Endpoint
+        collection = get_object_or_404(Collection, id=collection_id, project__user=request.user)
+        
+        # Get all endpoints in this collection
+        endpoints = Endpoint.objects.filter(collection=collection)
+        
+        # Get all test cases for this collection
+        test_cases = TestCase.objects.filter(endpoint__collection=collection)
+        
+        total_tests = test_cases.count()
+        if total_tests == 0:
+            return Response({
+                "collection_name": collection.name,
+                "collection_id": str(collection.id),
+                "project_name": collection.project.name,
+                "summary": {"total": 0, "passed": 0, "failed": 0, "pass_rate": 0},
+                "endpoints": []
+            })
+
+        # Get the latest run for each test case
+        from django.db.models import OuterRef, Subquery
+        latest_run_id = TestRun.objects.filter(
+            test_case=OuterRef('pk')
+        ).order_by('-executed_at').values('id')[:1]
+
+        latest_runs = TestRun.objects.filter(id__in=Subquery(latest_run_id))
+        
+        passed_count = latest_runs.filter(status="passed").count()
+        failed_count = latest_runs.filter(status__in=["failed", "error"]).count()
+        
+        # Group by Endpoint
+        endpoint_status = []
+        
+        for endpoint in endpoints:
+            endpoint_tests = test_cases.filter(endpoint=endpoint)
+            
+            tests_list = []
+            endpoint_failed = 0
+            has_runs = False
+            
+            for test in endpoint_tests:
+                latest_run = latest_runs.filter(test_case=test).first()
+                
+                run_status = "no_runs"
+                if latest_run:
+                    run_status = latest_run.status
+                    has_runs = True
+                    if run_status in ["failed", "error"]:
+                        endpoint_failed += 1
+                
+                tests_list.append({
+                    "id": test.id,
+                    "name": test.name,
+                    "status": run_status,
+                    "last_run_id": latest_run.id if latest_run else None,
+                    "last_run_at": latest_run.executed_at if latest_run else None,
+                    "category": test.category,
+                    "priority": test.priority
+                })
+
+            endpoint_status.append({
+                "id": endpoint.id,
+                "name": endpoint.name,
+                "method": endpoint.method,
+                "url": endpoint.url,
+                "total_tests": endpoint_tests.count(),
+                "failed_tests": endpoint_failed,
+                "status": "failing" if endpoint_failed > 0 else "passing" if has_runs else "no_runs",
+                "tests": tests_list
+            })
+
+        return Response({
+            "collection_name": collection.name,
+            "collection_id": str(collection.id),
+            "project_name": collection.project.name,
+            "project_id": str(collection.project.id),
+            "summary": {
+                "total": total_tests,
+                "passed": passed_count,
+                "failed": failed_count,
+                "pass_rate": round((passed_count / total_tests) * 100, 2) if total_tests > 0 else 0
+            },
+            "endpoints": endpoint_status
+        })
