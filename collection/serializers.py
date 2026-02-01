@@ -1,15 +1,13 @@
 from rest_framework import serializers
-from .models import Collection
+from .models import Collection, Endpoint
 
 
-class CollectionSerializer(serializers.ModelSerializer):
-    source = serializers.CharField(read_only=True)
-
+class EndpointSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Collection
+        model = Endpoint
         fields = [
             "id",
-            "project",
+            "collection",
             "name",
             "method",
             "url",
@@ -20,9 +18,8 @@ class CollectionSerializer(serializers.ModelSerializer):
             "request_body",
             "description",
             "created_at",
-            "source"
         ]
-        read_only_fields = ["id", "project", "created_at", "source"]
+        read_only_fields = ["id", "created_at"]
 
     def validate_url(self, value):
         if not value.startswith(("http://", "https://", "ws://", "wss://")):
@@ -30,4 +27,20 @@ class CollectionSerializer(serializers.ModelSerializer):
         return value
 
 
+class CollectionSerializer(serializers.ModelSerializer):
+    endpoints_count = serializers.IntegerField(source="endpoints.count", read_only=True)
 
+    class Meta:
+        model = Collection
+        fields = [
+            "id",
+            "project",
+            "name",
+            "description",
+            "base_url",
+            "headers",
+            "source",
+            "endpoints_count",
+            "created_at",
+        ]
+        read_only_fields = ["id", "project", "created_at", "source", "endpoints_count"]

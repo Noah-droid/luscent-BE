@@ -95,7 +95,7 @@ def send_test_run_report(test_run):
         return
 
     try:
-        user = test_run.test_case.collection.project.user
+        user = test_run.test_case.endpoint.collection.project.user
         test_case = test_run.test_case
         
         status_color = "#22c55e" if test_run.status == "passed" else "#ef4444"
