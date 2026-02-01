@@ -103,6 +103,9 @@ class AITestGenerator:
         if hasattr(item.collection.project, 'environment_variables') and item.collection.project.environment_variables:
              project_vars = item.collection.project.environment_variables
 
+        # **NEW: Gather Collection Context for Smarter AI**
+        collection_context = self._gather_collection_context(item.collection)
+
         # Format requested scenarios for the prompt
         scenario_instruction = ""
         
@@ -157,6 +160,26 @@ class AITestGenerator:
 
         Endpoint Details:
         {json.dumps(context, indent=2)}
+        """
+
+        # **NEW: Add Collection Context for Few-Shot Learning**
+        if collection_context['has_examples']:
+            instructions += f"""
+        
+        COLLECTION CONTEXT (Learn from these patterns):
+        This endpoint is part of the "{item.collection.name}" collection.
+        
+        Previous tests in this collection show these patterns:
+        - Auth Type: {collection_context['auth_type']}
+        - Common Headers: {json.dumps(collection_context['common_headers'], indent=2)}
+        - Response Format: {collection_context['response_format']}
+        - Common Assertions: {json.dumps(collection_context['common_assertions'][:3], indent=2)}
+        
+        Example tests from this collection (FOLLOW THIS STYLE):
+        {collection_context['example_tests']}
+        
+        IMPORTANT: Generate tests that match the style and patterns shown above.
+        Use similar assertion types, header structures, and naming conventions.
         """
 
         if runner_type == "browser":
@@ -387,5 +410,140 @@ class AITestGenerator:
             return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
         except:
             return "Error parsing Gemini vision response"
+
+    def _gather_collection_context(self, collection):
+        """
+        Gather context from previous tests in the collection for few-shot learning.
+        Returns patterns, examples, and insights to make AI smarter.
+        """
+        from .models import TestCase, TestRun
+        
+        # Get recent tests in this collection (limit to 10 for performance)
+        recent_tests = TestCase.objects.filter(
+            endpoint__collection=collection
+        ).order_by('-created_at')[:10]
+        
+        if not recent_tests.exists():
+            return {
+                'has_examples': False,
+                'auth_type': 'none',
+                'common_headers': {},
+                'response_format': 'unknown',
+                'common_assertions': [],
+                'example_tests': ''
+            }
+        
+        # Extract patterns
+        auth_types = set()
+        all_headers = []
+        all_assertions = []
+        response_formats = []
+        
+        for test in recent_tests:
+            # Collect auth types from endpoints
+            if hasattr(test.endpoint, 'auth_type'):
+                auth_types.add(test.endpoint.auth_type)
+            
+            # Collect headers
+            if test.headers:
+                all_headers.append(test.headers)
+            
+            # Collect assertions
+            if test.assertions:
+                all_assertions.extend(test.assertions)
+            
+            # Infer response format from assertions
+            for assertion in (test.assertions or []):
+                if assertion.get('type') == 'json_path':
+                    response_formats.append('JSON')
+                elif assertion.get('type') == 'contains':
+                    response_formats.append('HTML/Text')
+        
+        # Determine most common auth type
+        auth_type = list(auth_types)[0] if auth_types else 'none'
+        
+        # Find common headers (headers that appear in multiple tests)
+        common_headers = self._extract_common_headers(all_headers)
+        
+        # Determine response format
+        response_format = max(set(response_formats), key=response_formats.count) if response_formats else 'JSON'
+        
+        # Get most common assertion patterns
+        common_assertions = self._extract_common_assertions(all_assertions)
+        
+        # Format example tests (top 3 for few-shot learning)
+        example_tests = self._format_example_tests(recent_tests[:3])
+        
+        return {
+            'has_examples': True,
+            'auth_type': auth_type,
+            'common_headers': common_headers,
+            'response_format': response_format,
+            'common_assertions': common_assertions,
+            'example_tests': example_tests
+        }
+    
+    def _extract_common_headers(self, all_headers):
+        """Find headers that appear in multiple tests."""
+        if not all_headers:
+            return {}
+        
+        # Count header occurrences
+        header_counts = {}
+        for headers in all_headers:
+            for key, value in headers.items():
+                if key not in header_counts:
+                    header_counts[key] = []
+                header_counts[key].append(value)
+        
+        # Return headers that appear in at least 2 tests
+        common = {}
+        for key, values in header_counts.items():
+            if len(values) >= 2:
+                # Use most common value
+                common[key] = max(set(values), key=values.count)
+        
+        return common
+    
+    def _extract_common_assertions(self, all_assertions):
+        """Find most common assertion patterns."""
+        if not all_assertions:
+            return []
+        
+        # Group by type
+        assertion_types = {}
+        for assertion in all_assertions:
+            atype = assertion.get('type', 'unknown')
+            if atype not in assertion_types:
+                assertion_types[atype] = []
+            assertion_types[atype].append(assertion)
+        
+        # Return most common ones (max 5)
+        common = []
+        for atype, assertions in sorted(assertion_types.items(), key=lambda x: len(x[1]), reverse=True)[:5]:
+            # Pick a representative example
+            common.append(assertions[0])
+        
+        return common
+    
+    def _format_example_tests(self, tests):
+        """Format tests as examples for the AI prompt."""
+        if not tests:
+            return "No previous tests available."
+        
+        examples = []
+        for i, test in enumerate(tests, 1):
+            example = f"""
+Example {i}: {test.name}
+- Description: {test.description or 'N/A'}
+- Priority: {test.priority}
+- Headers: {json.dumps(test.headers or {}, indent=2)}
+- Body: {json.dumps(test.body or {}, indent=2) if test.body else 'None'}
+- Expected Status: {test.expected_status}
+- Assertions: {json.dumps(test.assertions[:2] if test.assertions else [], indent=2)}
+"""
+            examples.append(example.strip())
+        
+        return "\n\n".join(examples)
 
 
