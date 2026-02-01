@@ -1,5 +1,5 @@
 from django.db import models
-from collection.models import Collection
+from collection.models import Endpoint
 
 class TestCase(models.Model):
     PRIORITY_CHOICES = [
@@ -9,7 +9,7 @@ class TestCase(models.Model):
         ("low", "Low"),
     ]
 
-    collection = models.ForeignKey(Collection, on_delete=models.CASCADE, related_name="test_cases")
+    endpoint = models.ForeignKey(Endpoint, on_delete=models.CASCADE, related_name="test_cases")
     name = models.CharField(max_length=200, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     
@@ -59,7 +59,7 @@ class TestCase(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"{self.name} ({self.collection})"
+        return f"{self.name} ({self.endpoint})"
     
     def clean(self):
         """Validate test case data before saving."""
