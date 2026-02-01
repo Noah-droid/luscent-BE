@@ -1,10 +1,10 @@
 from rest_framework import generics, permissions, status
-from .models import Collection
+from .models import Collection, Endpoint
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
-from .serializers import CollectionSerializer
+from .serializers import CollectionSerializer, EndpointSerializer
 from projects.models import Project
 from .openapi_parser import (
     fetch_spec_from_url, load_spec_from_text, validate_openapi, parse_paths_to_endpoints
@@ -13,7 +13,7 @@ from .crawler import crawl_url
 import traceback
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
-
+from django.utils import timezone
 
 
 try:
@@ -23,9 +23,10 @@ except Exception:
     HAS_CELERY = False
 
 
-    
-
 class CollectionListCreateView(generics.ListCreateAPIView):
+    """
+    List all collections for a project or create a new one.
+    """
     serializer_class = CollectionSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -36,18 +37,14 @@ class CollectionListCreateView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         project_id = self.kwargs["project_id"]
-
-        project = Project.objects.filter(id=project_id,
-                                         user=self.request.user).first()
-        if not project:
-            raise PermissionError("Project not found or not yours.")
-
+        project = get_object_or_404(Project, id=project_id, user=self.request.user)
         serializer.save(project=project)
 
 
-
-
 class CollectionDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    Retrieve, update or delete a collection.
+    """
     serializer_class = CollectionSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -55,222 +52,148 @@ class CollectionDetailView(generics.RetrieveUpdateDestroyAPIView):
         return Collection.objects.filter(project__user=self.request.user)
 
 
+class EndpointListCreateView(generics.ListCreateAPIView):
+    """
+    List all endpoints in a collection or create a manual one.
+    """
+    serializer_class = EndpointSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        collection_id = self.kwargs["collection_id"]
+        return Endpoint.objects.filter(collection__id=collection_id,
+                                     collection__project__user=self.request.user)
+
+    def perform_create(self, serializer):
+        collection_id = self.kwargs["collection_id"]
+        collection = get_object_or_404(Collection, id=collection_id, collection__project__user=self.request.user)
+        serializer.save(collection=collection)
 
 
+class EndpointDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    Retrieve, update or delete an endpoint definition.
+    """
+    serializer_class = EndpointSerializer
+    permission_classes = [permissions.IsAuthenticated]
 
+    def get_queryset(self):
+        return Endpoint.objects.filter(collection__project__user=self.request.user)
 
 
 class SwaggerImportView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(
-        operation_description="Import endpoints from a Swagger/OpenAPI specification",
+        operation_description="Import endpoints from Swagger/OpenAPI into a new collection",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             properties={
-                'swagger_url': openapi.Schema(type=openapi.TYPE_STRING, description="URL to the Swagger/OpenAPI JSON or YAML file"),
-                'file': openapi.Schema(type=openapi.TYPE_FILE, description="Swagger/OpenAPI file to upload"),
-                'async': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=True, description="Run the import in the background"),
-                'skip_validation': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=False, description="Skip strict OpenAPI spec validation")
+                'swagger_url': openapi.Schema(type=openapi.TYPE_STRING),
+                'file': openapi.Schema(type=openapi.TYPE_FILE),
+                'collection_name': openapi.Schema(type=openapi.TYPE_STRING, description="Optional name for the new collection"),
+                'async': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=True),
+                'skip_validation': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=False)
             }
         ),
-        responses={
-            201: openapi.Response("Imported", openapi.Schema(
-                type=openapi.TYPE_OBJECT,
-                properties={
-                    'imported': openapi.Schema(type=openapi.TYPE_INTEGER),
-                    'skipped': openapi.Schema(type=openapi.TYPE_INTEGER),
-                    'errors': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING))
-                }
-            )),
-            202: openapi.Response("Queued", openapi.Schema(
-                type=openapi.TYPE_OBJECT,
-                properties={
-                    'message': openapi.Schema(type=openapi.TYPE_STRING),
-                    'task_id': openapi.Schema(type=openapi.TYPE_STRING)
-                }
-            )),
-            400: "Invalid Input",
-            404: "Project not found"
-        }
+        responses={201: "Created", 202: "Accepted", 400: "Bad Request"}
     )
     def post(self, request, project_id):
-        """
-        POST payload: form-data or JSON
-        - swagger_url: (optional) URL to swagger/openapi file
-        - file: (optional) file upload (json or yaml)
-        - async: (optional) boolean (default true if celery available)
-        """
         project = get_object_or_404(Project, id=project_id, user=request.user)
-
         swagger_url = request.data.get("swagger_url")
         swagger_file = request.FILES.get("file")
+        collection_name = request.data.get("collection_name") or f"Swagger Import - {timezone.now().strftime('%Y-%m-%d %H:%M')}"
         run_async = request.data.get("async", True) and HAS_CELERY
         skip_validation = request.data.get("skip_validation", False)
 
         if not swagger_url and not swagger_file:
-            return Response({"error": "Provide swagger_url or upload a file."}, status=status.HTTP_400_BAD_REQUEST)
-
-        if run_async and not HAS_CELERY:
-            run_async = False
+            return Response({"error": "Provide swagger_url or upload a file."}, status=400)
 
         if run_async:
-            # queue a background task
-            task = import_swagger_task.delay(project.id, swagger_url, skip_validation=skip_validation)
-            return Response({"message": "Swagger import queued", "task_id": task.id}, status=status.HTTP_202_ACCEPTED)
+            task = import_swagger_task.delay(project.id, swagger_url, collection_name=collection_name, skip_validation=skip_validation)
+            return Response({"message": "Import queued", "task_id": task.id}, status=202)
 
-        # synchronous path: fetch/parse/run immediately
+        # Sync
         try:
-            if swagger_file:
-                raw_text = swagger_file.read().decode("utf-8")
-            else:
-                raw_text = fetch_spec_from_url(swagger_url)
-
+            raw_text = swagger_file.read().decode("utf-8") if swagger_file else fetch_spec_from_url(swagger_url)
             spec = load_spec_from_text(raw_text)
-
+            
             if not skip_validation:
-                valid, validation_error = validate_openapi(spec)
-                if not valid:
-                    return Response({"error": "Spec validation failed", "detail": validation_error}, status=status.HTTP_400_BAD_REQUEST)
+                valid, err = validate_openapi(spec)
+                if not valid: return Response({"error": "Validation failed", "detail": err}, status=400)
 
-            # Pass None as default_base_url since project doesn't have it anymore
-            parse_result = parse_paths_to_endpoints(spec, project_obj=project, default_base_url=None)
-            created, skipped, errors = 0, parse_result.get("skipped", 0), parse_result.get("errors", [])
+            # Create Collection
+            coll = Collection.objects.create(project=project, name=collection_name, source="swagger")
+            
+            from .openapi_parser import extract_base_url
+            coll.base_url = extract_base_url(spec)
+            coll.save()
+
+            parse_result = parse_paths_to_endpoints(spec, project_obj=project)
             endpoints = parse_result.get("endpoints", [])
-
-            # persist endpoints
+            created_count = 0
+            
             for e in endpoints:
-                try:
-                    # Use full_url from parser
-                    tgt_url = e.get("full_url") or e.get("path") # Fallback to path if base_url missing
-                    
-                    endpoint_obj, created_flag = Collection.objects.get_or_create(
-                        project=project,
-                        method=e["method"],
-                        url=tgt_url,
-                        defaults={
-                            "name": e["name"],
-                            "source": "swagger",
-                            "query_params": {}, 
-                            "headers": {},
-                            "request_body": e.get("requestBody") or {},
-                            "description": e.get("description", "")
-                        }
-                    )
-                    if created_flag:
-                        created += 1
-                except Exception as ee:
-                    errors.append(f"DB create error for {e['method']} {e['path']}: {str(ee)}")
+                Endpoint.objects.create(
+                    collection=coll,
+                    method=e["method"],
+                    url=e["full_url"] or e["path"],
+                    name=e["name"],
+                    description=e.get("description", ""),
+                    request_body=e.get("requestBody") or {},
+                    query_params={}, 
+                    headers={}
+                )
+                created_count += 1
 
-            return Response({
-                "imported": created,
-                "skipped": skipped,
-                "errors": errors
-            }, status=status.HTTP_201_CREATED)
-
-        except Exception as exc:
+            return Response({"message": f"Imported {created_count} endpoints into collection '{collection_name}'"}, status=201)
+        except Exception as e:
             traceback.print_exc()
-            return Response({"error": "Failed to import swagger", "detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": str(e)}, status=500)
 
 
 class CrawlerImportView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     @swagger_auto_schema(
-        operation_description="Crawl a website to discover endpoints and import them",
+        operation_description="Crawl a website and import pages as endpoints into a new collection",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             required=['url'],
             properties={
-                'url': openapi.Schema(type=openapi.TYPE_STRING, description="Start URL for the crawler"),
-                'max_pages': openapi.Schema(type=openapi.TYPE_INTEGER, default=50, description="Maximum number of pages to crawl"),
-                'async': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=True, description="Run the crawler in the background")
+                'url': openapi.Schema(type=openapi.TYPE_STRING),
+                'collection_name': openapi.Schema(type=openapi.TYPE_STRING),
+                'max_pages': openapi.Schema(type=openapi.TYPE_INTEGER, default=50),
+                'async': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=True)
             }
-        ),
-        responses={
-            201: openapi.Response("Crawler Finished", openapi.Schema(
-                type=openapi.TYPE_OBJECT,
-                properties={
-                    'imported': openapi.Schema(type=openapi.TYPE_INTEGER),
-                    'found': openapi.Schema(type=openapi.TYPE_INTEGER),
-                    'errors': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING))
-                }
-            )),
-            202: openapi.Response("Crawler Started", openapi.Schema(
-                type=openapi.TYPE_OBJECT,
-                properties={
-                    'message': openapi.Schema(type=openapi.TYPE_STRING),
-                    'task_id': openapi.Schema(type=openapi.TYPE_STRING)
-                }
-            )),
-            400: "Invalid Input",
-            404: "Project not found"
-        }
+        )
     )
     def post(self, request, project_id):
-        """
-        POST payload:
-        - url: start URL
-        - max_pages: optional int
-        - async: optional bool
-        """
         project = get_object_or_404(Project, id=project_id, user=request.user)
-        
         start_url = request.data.get("url")
-        if not start_url:
-             return Response({"error": "url is required"}, status=status.HTTP_400_BAD_REQUEST)
-        
+        collection_name = request.data.get("collection_name") or f"Crawler Import - {timezone.now().strftime('%Y-%m-%d %H:%M')}"
         max_pages = int(request.data.get("max_pages", 50))
         run_async = request.data.get("async", True) and HAS_CELERY
-        
-        if run_async and not HAS_CELERY:
-            run_async = False
-            
-        if run_async:
-            task = import_crawler_task.delay(project.id, start_url, max_pages)
-            return Response({"message": "Crawler started", "task_id": task.id}, status=status.HTTP_202_ACCEPTED)
 
-        # Synchronous
+        if not start_url: return Response({"error": "url is required"}, status=400)
+
+        if run_async:
+            task = import_crawler_task.delay(project.id, start_url, collection_name=collection_name, max_pages=max_pages)
+            return Response({"message": "Crawler started", "task_id": task.id}, status=202)
+
         try:
             endpoints = crawl_url(start_url, max_pages=max_pages)
-            created_count = 0
-            errors = []
+            coll = Collection.objects.create(project=project, name=collection_name, source="crawler", base_url=start_url)
             
             for e in endpoints:
-                try:
-                    # Use full_url from crawler result
-                    tgt_url = e.get("full_url")
-                    if not tgt_url:
-                        # Should not happen given crawler logic, but fallback
-                        tgt_url = e["path"]
-
-                    obj, created = Collection.objects.get_or_create(
-                         project=project,
-                         method=e["method"],
-                         url=tgt_url,
-                         defaults={
-                             "name": e["name"],
-                             "description": e.get("description", ""),
-                             "source": "crawler"
-                         }
-                    )
-                    if created:
-                        created_count += 1
-                except Exception as ee:
-                    errors.append(str(ee))
+                Endpoint.objects.create(
+                    collection=coll,
+                    method=e["method"],
+                    url=e["full_url"],
+                    name=e["name"],
+                    description=e.get("description", "")
+                )
             
-            return Response({
-                "imported": created_count,
-                "found": len(endpoints),
-                "errors": errors
-            }, status=status.HTTP_201_CREATED)
-            
-        except Exception as exc:
-            traceback.print_exc()
-            return Response({"error": "Crawler failed", "detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-
-
-
-
+            return Response({"message": f"Crawled and imported {len(endpoints)} pages"}, status=201)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
