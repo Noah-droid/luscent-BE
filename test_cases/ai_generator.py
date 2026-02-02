@@ -147,6 +147,7 @@ class AITestGenerator:
         Generate test cases for the following API endpoint/feature.
 
         Context:
+        - Project: {project_description or 'N/A'}
         - Type: {category} Testing
         - Layer: {layer}
         - Runner: {runner_type}
@@ -168,6 +169,7 @@ class AITestGenerator:
         
         COLLECTION CONTEXT (Learn from these patterns):
         This endpoint is part of the "{item.collection.name}" collection.
+        Collection Description: {item.collection.description or 'No description provided.'}
         
         Previous tests in this collection show these patterns:
         - Auth Type: {collection_context['auth_type']}
