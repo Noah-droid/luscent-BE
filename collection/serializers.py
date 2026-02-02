@@ -41,6 +41,9 @@ class CollectionSerializer(serializers.ModelSerializer):
             "headers",
             "source",
             "endpoints_count",
+            "is_scheduled",
+            "schedule_interval",
+            "last_scheduled_run_at",
             "created_at",
         ]
-        read_only_fields = ["id", "project", "created_at", "source", "endpoints_count"]
+        read_only_fields = ["id", "project", "created_at", "source", "endpoints_count", "last_scheduled_run_at"]
