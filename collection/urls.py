@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import (
-    CollectionListCreateView, 
-    CollectionDetailView, 
+    CollectionListCreateView,
+    CollectionDetailView,
     EndpointListCreateView,
     EndpointDetailView,
     SwaggerImportView,
@@ -18,6 +18,6 @@ urlpatterns = [
     path("endpoints/<int:pk>/", EndpointDetailView.as_view(), name="endpoint-detail"),
     
     # Bulk Imports
-    path("projects/<uuid:project_id>/import-swagger/", SwaggerImportView.as_view(), name="swagger-import"),
-    path("projects/<uuid:project_id>/import-crawler/", CrawlerImportView.as_view(), name="crawler-import"),
+    path("<int:collection_id>/import-swagger/", SwaggerImportView.as_view(), name="swagger-import"),
+    path("<int:collection_id>/import-crawler/", CrawlerImportView.as_view(), name="crawler-import"),
 ]
