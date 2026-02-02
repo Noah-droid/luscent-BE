@@ -1,6 +1,7 @@
 from celery import shared_task
 from .runner_service import RunnerService
 import logging
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -185,4 +186,52 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
             except Exception as e:
                 logger.error(f"Collection Auto-Pilot failed to create/run test for {endpoint.name}: {e}")
 
+
+@shared_task
+def check_periodic_schedules_task():
+    """
+    Background worker that runs every minute to scan for collections
+    that are due for a 'period check' (uptime monitoring).
+    """
+    from collection.models import Collection
+    from .tasks import run_test_case_task
+    from billing.services import deduct_tokens, calculate_test_cost
+    import uuid
+
+    now = timezone.now()
+    # Find all scheduled collections
+    scheduled_collections = Collection.objects.filter(is_scheduled=True)
+
+    for collection in scheduled_collections:
+        # Check if it's due
+        # Logic: (now - last_run) >= interval_minutes
+        is_due = False
+        if not collection.last_scheduled_run_at:
+            is_due = True
+        else:
+            diff = now - collection.last_scheduled_run_at
+            if diff.total_seconds() / 60 >= collection.schedule_interval - 0.1: # 0.1 buffer for slight delays
+                is_due = True
+
+        if is_due:
+            logger.info(f"Triggering scheduled period check for: {collection.name}")
+            batch_id = uuid.uuid4()
+            endpoints = collection.endpoints.all()
+            
+            for endpoint in endpoints:
+                for test_case in endpoint.test_cases.all():
+                    # Billing check for the run
+                    user = collection.project.user
+                    cost = calculate_test_cost(test_case.runner_type)
+                    
+                    if deduct_tokens(user, cost, f"Scheduled Check: {test_case.name}"):
+                        run_test_case_task.delay(
+                            test_case.id,
+                            batch_id=batch_id,
+                            triggered_by="scheduled"
+                        )
+            
+            # Update last run timestamp
+            collection.last_scheduled_run_at = now
+            collection.save(update_fields=['last_scheduled_run_at'])
 

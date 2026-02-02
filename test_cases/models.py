@@ -137,7 +137,7 @@ class TestRun(models.Model):
     
     executed_at = models.DateTimeField(auto_now_add=True)
     batch_id = models.UUIDField(null=True, blank=True, db_index=True, help_text="Group ID for batch executions")
-    triggered_by = models.CharField(max_length=50, choices=[("manual", "Manual"), ("ai", "AI Auto-Pilot"), ("webhook", "Webhook")], default="manual")
+    triggered_by = models.CharField(max_length=50, choices=[("manual", "Manual"), ("ai", "AI Auto-Pilot"), ("webhook", "Webhook"), ("scheduled", "Scheduled")], default="manual")
     
     def __str__(self):
         return f"Run {self.id} for {self.test_case.name} - {self.status}"

@@ -455,6 +455,9 @@ class TestRunListView(generics.ListAPIView):
         endpoint_id = self.request.query_params.get("endpoint_id")
         collection_id = self.request.query_params.get("collection_id")
         batch_id = self.request.query_params.get("batch_id")
+        status_filter = self.request.query_params.get("status")
+        start_date = self.request.query_params.get("start_date")
+        end_date = self.request.query_params.get("end_date")
         
         queryset = TestRun.objects.filter(test_case__endpoint__collection__project__user=self.request.user)
         
@@ -469,6 +472,15 @@ class TestRunListView(generics.ListAPIView):
         
         if batch_id:
             queryset = queryset.filter(batch_id=batch_id)
+
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+            
+        if start_date:
+            queryset = queryset.filter(executed_at__gte=start_date)
+            
+        if end_date:
+            queryset = queryset.filter(executed_at__lte=end_date)
             
         return queryset.order_by('-executed_at')
 
@@ -477,7 +489,7 @@ class TestRunDetailView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
     
     def get_queryset(self):
-        return TestRun.objects.filter(test_case__collection__project__user=self.request.user)
+        return TestRun.objects.filter(test_case__endpoint__collection__project__user=self.request.user)
 
 
 class ProjectStatusView(APIView):
