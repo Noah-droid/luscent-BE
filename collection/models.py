@@ -19,6 +19,16 @@ class Collection(models.Model):
         ("crawler", "Crawler"),
     ]
     source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default="manual")
+    
+    # Scheduling fields for "period checks"
+    is_scheduled = models.BooleanField(default=False)
+    schedule_interval = models.IntegerField(
+        choices=[(5, "5 Minutes"), (15, "15 Minutes"), (60, "1 Hour"), (1440, "24 Hours")],
+        default=60,
+        null=True, blank=True
+    )
+    last_scheduled_run_at = models.DateTimeField(null=True, blank=True)
+    
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
