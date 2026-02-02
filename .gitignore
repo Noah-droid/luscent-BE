@@ -5,3 +5,7 @@ db.sqlite3
 __pycache__
 
 .DS_Store
+remote_runners/
+runner/
+Dockerfile.hybrid
+
