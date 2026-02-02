@@ -134,7 +134,12 @@ class DraftTestPlanView(APIView):
                 category=category,
                 layer=layer,
                 project_description=project_desc,
-                user_story=user_story
+                user_story=(
+                    user_story or 
+                    endpoint_item.collection.user_story or 
+                    endpoint_item.collection.project.user_story or 
+                    endpoint_item.collection.project.description
+                )
             )
             return Response(draft_tests, status=status.HTTP_200_OK)
         except Exception as e:
