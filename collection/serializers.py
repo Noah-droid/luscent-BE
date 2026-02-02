@@ -37,6 +37,7 @@ class CollectionSerializer(serializers.ModelSerializer):
             "project",
             "name",
             "description",
+            "user_story",
             "base_url",
             "headers",
             "source",
