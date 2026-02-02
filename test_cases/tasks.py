@@ -64,10 +64,10 @@ def project_auto_pilot_task(project_id, user_id, scenarios, batch_id, user_story
     collections = Collection.objects.filter(project=project)
     generator = AITestGenerator()
 
-    # If no story provided in the trigger, use the project description as base context
-    final_story = user_story or project.description or ""
-    
     for coll in collections:
+        # If no story provided in the trigger, use the collection context or project context as base
+        final_story = user_story or coll.user_story or coll.description or project.user_story or project.description or ""
+        
         # Auto-Pilot for each endpoint in the collection
         endpoints = coll.endpoints.all()
         for endpoint in endpoints:
@@ -134,8 +134,8 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     collection = Collection.objects.get(id=collection_id)
     generator = AITestGenerator()
 
-    # If no story provided, use collection description or project description
-    final_story = user_story or collection.description or collection.project.description or ""
+    # If no story provided, use collection context or project context
+    final_story = user_story or collection.user_story or collection.description or collection.project.user_story or collection.project.description or ""
     
     # Auto-Pilot for each endpoint in the collection
     endpoints = collection.endpoints.all()

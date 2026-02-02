@@ -7,6 +7,7 @@ class Collection(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="collections")
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True, null=True)
+    user_story = models.TextField(blank=True, null=True)
     
     # Optional shared configuration
     base_url = models.CharField(max_length=500, blank=True, null=True)

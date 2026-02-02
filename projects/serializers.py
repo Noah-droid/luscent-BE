@@ -10,6 +10,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "description",
+            "user_story",
             "environment_variables",
             "created_at",
             "updated_at",
