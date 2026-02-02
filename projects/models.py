@@ -12,6 +12,7 @@ class Project(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="projects")
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True, null=True)
+    user_story = models.TextField(blank=True, null=True)
     environment_variables = EncryptedJSONField(default=dict, blank=True, help_text="Key-value pairs for test generation")
 
     created_at = models.DateTimeField(auto_now_add=True)
