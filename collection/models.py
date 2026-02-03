@@ -1,9 +1,10 @@
 from django.db import models
 from projects.models import Project
 from encrypted_fields.fields import EncryptedCharField, EncryptedJSONField
-
+import uuid
 
 class Collection(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="collections")
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True, null=True)

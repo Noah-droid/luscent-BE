@@ -605,7 +605,11 @@ class ProjectAutoPilotView(APIView):
             properties={
                 'scenarios': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING), 
                     description="Standard scenarios to generate for each endpoint (e.g. ['HAPPY_PATH'])"),
-                'user_story': openapi.Schema(type=openapi.TYPE_STRING, description="Optional: Context or requirements that apply to all endpoints in this batch")
+                'user_story': openapi.Schema(type=openapi.TYPE_STRING, description="Optional: Context or requirements that apply to all endpoints in this batch"),
+                'runner_types': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING, enum=['http', 'load', 'browser']), default=['http']),
+                'categories': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING), default=['functional']),
+                'layer': openapi.Schema(type=openapi.TYPE_STRING, default='backend'),
+                'use_visual_ai': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=False)
             }
         ),
         responses={202: "Auto-Pilot started"}
@@ -614,6 +618,20 @@ class ProjectAutoPilotView(APIView):
         project = get_object_or_404(Project, id=project_id, user=request.user)
         scenarios = request.data.get("scenarios", ["HAPPY_PATH", "VALIDATION_ERROR", "SECURITY"])
         user_story = request.data.get("user_story", "")
+        
+        # Parse lists directly, fallback to single legacy keys if needed
+        runner_types = request.data.get("runner_types", [])
+        if not runner_types:
+             single = request.data.get("runner_type", "http")
+             runner_types = [single]
+
+        categories = request.data.get("categories", [])
+        if not categories:
+             single = request.data.get("category", "functional")
+             categories = [single]
+
+        layer = request.data.get("layer", "backend")
+        use_visual_ai = request.data.get("use_visual_ai", False)
         
         if not HAS_CELERY:
             return Response({"error": "Auto-Pilot requires Celery for background processing."}, status=501)
@@ -629,7 +647,11 @@ class ProjectAutoPilotView(APIView):
             user_id=request.user.id,
             scenarios=scenarios,
             batch_id=str(batch_id),
-            user_story=user_story
+            user_story=user_story,
+            runner_types=runner_types,
+            categories=categories,
+            layer=layer,
+            use_visual_ai=use_visual_ai
         )
 
         return Response({
@@ -653,7 +675,11 @@ class CollectionAutoPilotView(APIView):
             properties={
                 'scenarios': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING), 
                     description="Standard scenarios to generate for each endpoint (e.g. ['HAPPY_PATH'])"),
-                'user_story': openapi.Schema(type=openapi.TYPE_STRING, description="Optional: Context or requirements for this collection")
+                'user_story': openapi.Schema(type=openapi.TYPE_STRING, description="Optional: Context or requirements for this collection"),
+                'runner_types': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING, enum=['http', 'load', 'browser']), default=['http']),
+                'categories': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING), default=['functional']),
+                'layer': openapi.Schema(type=openapi.TYPE_STRING, default='backend'),
+                'use_visual_ai': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=False)
             }
         ),
         responses={202: "Auto-Pilot started"}
@@ -664,6 +690,20 @@ class CollectionAutoPilotView(APIView):
         
         scenarios = request.data.get("scenarios", ["HAPPY_PATH", "VALIDATION_ERROR", "SECURITY"])
         user_story = request.data.get("user_story", "")
+        
+        # Parse lists directly, fallback to single legacy keys if needed
+        runner_types = request.data.get("runner_types", [])
+        if not runner_types:
+             single = request.data.get("runner_type", "http")
+             runner_types = [single]
+
+        categories = request.data.get("categories", [])
+        if not categories:
+             single = request.data.get("category", "functional")
+             categories = [single]
+
+        layer = request.data.get("layer", "backend")
+        use_visual_ai = request.data.get("use_visual_ai", False)
         
         if not HAS_CELERY:
             return Response({"error": "Auto-Pilot requires Celery for background processing."}, status=501)
@@ -678,7 +718,11 @@ class CollectionAutoPilotView(APIView):
             user_id=request.user.id,
             scenarios=scenarios,
             batch_id=str(batch_id),
-            user_story=user_story
+            user_story=user_story,
+            runner_types=runner_types,
+            categories=categories,
+            layer=layer,
+            use_visual_ai=use_visual_ai
         )
 
         return Response({
