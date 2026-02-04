@@ -11,7 +11,7 @@ import traceback
 
 logger = logging.getLogger(__name__)
 
-@shared_task(bind=True, soft_time_limit=120)
+@shared_task(name="import_swagger", bind=True, soft_time_limit=120)
 def import_swagger_task(self, collection_id, swagger_url, skip_validation=False):
     """
     Celery task to fetch and import swagger spec into an existing collection.
@@ -61,7 +61,7 @@ def import_swagger_task(self, collection_id, swagger_url, skip_validation=False)
         return {"error": str(exc)}
 
 
-@shared_task(bind=True, soft_time_limit=300)
+@shared_task(name="import_crawler", bind=True, soft_time_limit=300)
 def import_crawler_task(self, collection_id, start_url, max_pages=50):
     """
     Celery task to crawl a website and import found endpoints into an existing collection.
