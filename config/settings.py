@@ -224,10 +224,11 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
+CELERY_IMPORTS = ('test_cases.tasks', 'collection.tasks')
 
 CELERY_BEAT_SCHEDULE = {
     'check-periodic-test-schedules': {
-        'task': 'test_cases.tasks.check_periodic_schedules_task',
+        'task': 'check_periodic_schedules',
         'schedule': 120.0, # Run every 2 minutes
     },
 }
