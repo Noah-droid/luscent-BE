@@ -4,8 +4,10 @@ import logging
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+logger.info("TEST_CASES TASKS MODULE LOADING...")
 
 @shared_task(
+    name="run_test_case",
     bind=True,
     time_limit=180,        # Hard timeout: 3 minutes (kills task)
     soft_time_limit=150,   # Soft timeout: 2.5 minutes (raises exception)
@@ -47,7 +49,7 @@ def run_test_case_task(self, test_case_id, override_url=None, batch_id=None, tri
             raise
 
 
-@shared_task(time_limit=1800) # 30 mins max
+@shared_task(name="project_auto_pilot", time_limit=1800) # 30 mins max
 def project_auto_pilot_task(project_id, user_id, scenarios, batch_id, user_story=None, runner_types=["http"], categories=["functional"], layer="backend", use_visual_ai=False):
     """
     Auto-Pilot background task.
@@ -127,7 +129,7 @@ def project_auto_pilot_task(project_id, user_id, scenarios, batch_id, user_story
                         logger.error(f"Auto-Pilot failed to create/run test for {endpoint.name}: {e}")
 
 
-@shared_task(time_limit=1800)  # 30 mins max
+@shared_task(name="collection_auto_pilot", time_limit=1800)  # 30 mins max
 def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user_story=None, runner_types=["http"], categories=["functional"], layer="backend", use_visual_ai=False):
     """
     Collection-level Auto-Pilot background task.
@@ -213,14 +215,13 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
                     logger.error(f"Collection Auto-Pilot failed to create/run test for {endpoint.name}: {e}")
 
 
-@shared_task
+@shared_task(name="check_periodic_schedules")
 def check_periodic_schedules_task():
     """
     Background worker that runs every minute to scan for collections
     that are due for a 'period check' (uptime monitoring).
     """
     from collection.models import Collection
-    from .tasks import run_test_case_task
     from billing.services import deduct_tokens, calculate_test_cost
     import uuid
 
@@ -261,3 +262,8 @@ def check_periodic_schedules_task():
             collection.last_scheduled_run_at = now
             collection.save(update_fields=['last_scheduled_run_at'])
 
+# LEGACY SHIM: Support old task name for environments still using the old scheduler
+@shared_task(name="test_cases.tasks.check_periodic_schedules_task")
+def legacy_check_periodic_schedules_task():
+    logger.info("Legacy periodic task name triggered, redirecting to new name.")
+    return check_periodic_schedules_task()
