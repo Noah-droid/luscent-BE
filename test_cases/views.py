@@ -114,10 +114,12 @@ class DraftTestPlanView(APIView):
         from billing.services import deduct_tokens
         COST = 5
         if not deduct_tokens(request.user, COST, f"AI Generation: {endpoint_item.name}"):
-             return Response(
-                 {"error": f"Insufficient tokens. Required: {COST}, Balance: {request.user.token_balance}"}, 
-                 status=402 # Payment Required
-             )
+             balance = request.user.token_balance
+             if balance <= 0:
+                 error_msg = "You have no tokens available. Please top up your balance."
+             else:
+                 error_msg = f"Insufficient tokens. Required: {COST}, Balance: {balance}."
+             return Response({"error": error_msg}, status=402)
 
         # 1. Fetch Swagger/OpenAPI spec context if available
         spec_context = ""
@@ -318,7 +320,12 @@ class BatchCreateTestsView(APIView):
                     else:
                         RunnerService().execute_test(test.id, batch_id=batch_id, triggered_by="manual")
             else:
-                errors.append({"error": f"Insufficient tokens for auto-run. Required: {total_auto_run_cost}, Balance: {request.user.token_balance}. Tests were created but not run."})
+                balance = request.user.token_balance
+                if balance <= 0:
+                    error_msg = "You have no tokens available for auto-run. Please top up your balance. Tests were created but not run."
+                else:
+                    error_msg = f"Insufficient tokens for auto-run. Required: {total_auto_run_cost}, Balance: {balance}. Tests were created but not run."
+                errors.append({"error": error_msg})
 
 
         serializer = TestCaseSerializer(created_tests, many=True)
@@ -353,10 +360,12 @@ class RunTestView(APIView):
         cost = calculate_test_cost(test_case.runner_type)
         
         if not deduct_tokens(request.user, cost, f"Run Test: {test_case.name}"):
-             return Response(
-                 {"error": f"Insufficient tokens. Required: {cost}, Balance: {request.user.token_balance}"}, 
-                 status=402
-             )
+             balance = request.user.token_balance
+             if balance <= 0:
+                 error_msg = "You have no tokens available. Please top up your balance to run tests."
+             else:
+                 error_msg = f"Insufficient tokens. Required: {cost}, Balance: {balance}."
+             return Response({"error": error_msg}, status=402)
         
         if run_async:
             try:
@@ -424,9 +433,12 @@ class TriggerTestRunView(APIView):
         total_cost = sum(calculate_test_cost(tc.runner_type) for tc in test_cases)
         
         if not deduct_tokens(request.user, total_cost, f"Webhook Trigger: {project.name}"):
-            return Response({
-                'error': f'Insufficient tokens. Required: {total_cost}, Balance: {request.user.token_balance}'
-            }, status=status.HTTP_402_PAYMENT_REQUIRED)
+            balance = request.user.token_balance
+            if balance <= 0:
+                error_msg = "You have no tokens available. Please top up your balance."
+            else:
+                error_msg = f"Insufficient tokens. Required: {total_cost}, Balance: {balance}."
+            return Response({'error': error_msg}, status=status.HTTP_402_PAYMENT_REQUIRED)
 
         # Enqueue runs
         run_ids = []
@@ -637,6 +649,10 @@ class ProjectAutoPilotView(APIView):
         if not HAS_CELERY:
             return Response({"error": "Auto-Pilot requires Celery for background processing."}, status=501)
 
+        # Billing: Upfront check
+        if request.user.token_balance <= 0:
+            return Response({"error": "You have no tokens available. Please top up your balance to use Auto-Pilot."}, status=402)
+
         import uuid
         batch_id = uuid.uuid4()
         
@@ -708,6 +724,10 @@ class CollectionAutoPilotView(APIView):
         
         if not HAS_CELERY:
             return Response({"error": "Auto-Pilot requires Celery for background processing."}, status=501)
+
+        # Billing: Upfront check
+        if request.user.token_balance <= 0:
+            return Response({"error": "You have no tokens available. Please top up your balance to use Auto-Pilot."}, status=402)
 
         import uuid
         batch_id = uuid.uuid4()
