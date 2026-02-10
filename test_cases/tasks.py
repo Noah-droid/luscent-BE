@@ -28,14 +28,17 @@ def run_test_case_task(self, test_case_id, override_url=None, batch_id=None, tri
         SoftTimeLimitExceeded: If task exceeds soft_time_limit
         TimeLimitExceeded: If task exceeds time_limit
     """
+    logger.info(f"[CeleryTask] run_test_case_task started: test_case_id={test_case_id}, batch_id={batch_id}, triggered_by={triggered_by}")
     try:
         service = RunnerService()
-        service.execute_test(
+        result = service.execute_test(
             test_case_id, 
             override_url=override_url, 
             batch_id=batch_id, 
             triggered_by=triggered_by
         )
+        logger.info(f"[CeleryTask] run_test_case_task completed successfully for test_case_id={test_case_id}")
+        return result
     except Exception as exc:
         # Log the error
         logger.error(f"Test case {test_case_id} failed: {exc}")
@@ -136,6 +139,8 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     Generates and runs tests for all endpoints in a specific collection.
     Supports multiple runner types and categories.
     """
+    logger.info(f"[CollectionAutoPilot] Starting for collection_id={collection_id}, batch_id={batch_id}, scenarios={scenarios}, categories={categories}")
+    
     from .models import TestCase
     from collection.models import Collection
     from users.models import User
@@ -152,13 +157,16 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     
     # Auto-Pilot for each endpoint in the collection
     endpoints = collection.endpoints.all()
+    logger.info(f"[CollectionAutoPilot] Found {endpoints.count()} endpoints to process")
 
     # Iterate over categories (Functional, Security, etc.)
     # We NO LONGER iterate over runner_types directly. We pass the list to the AI
     # and let the AI decide the best runner (HTTP vs Browser) for each endpoint.
     
     for endpoint in endpoints:
+        logger.info(f"[CollectionAutoPilot] Processing endpoint: {endpoint.name} ({endpoint.method} {endpoint.url})")
         for category in categories:
+            logger.info(f"[CollectionAutoPilot] Generating {category} tests for endpoint: {endpoint.name}")
             
             # 1. Billing check for AI
             AI_COST = 5
@@ -168,14 +176,19 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
                 continue
 
             # 2. Call AI with allowed_runners list
-            draft_tests = generator.generate_draft_plan(
-                endpoint,
-                scenarios=scenarios,
-                user_story=final_story,
-                allowed_runners=runner_types, # Pass the list!
-                category=category,
-                layer=layer
-            )
+            try:
+                draft_tests = generator.generate_draft_plan(
+                    endpoint,
+                    scenarios=scenarios,
+                    user_story=final_story,
+                    allowed_runners=runner_types, # Pass the list!
+                    category=category,
+                    layer=layer
+                )
+                logger.info(f"[CollectionAutoPilot] AI generated {len(draft_tests)} tests for {endpoint.name}")
+            except Exception as e:
+                logger.error(f"[CollectionAutoPilot] AI generation failed for {endpoint.name}: {e}")
+                continue
             
             # 3. Save Tests & Trigger Runs
             for data in draft_tests:
@@ -202,17 +215,23 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
                         ai_generated=True,
                         user_story=data.get("user_story", final_story)
                     )
+                    logger.info(f"[CollectionAutoPilot] Created test case: {test_case.name} (id={test_case.id})")
                     
                     # 4. Trigger Run (Immediate Queue)
                     RUN_COST = calculate_test_cost(test_case.runner_type)
                     if deduct_tokens(user, RUN_COST, f"Auto-Pilot Run: {test_case.name}"):
+                        logger.info(f"[CollectionAutoPilot] Queueing test run for: {test_case.name}")
                         run_test_case_task.delay(
                             test_case.id, 
                             batch_id=batch_id, 
                             triggered_by="ai"
                         )
+                    else:
+                        logger.warning(f"[CollectionAutoPilot] Insufficient tokens to run test: {test_case.name}")
                 except Exception as e:
                     logger.error(f"Collection Auto-Pilot failed to create/run test for {endpoint.name}: {e}")
+    
+    logger.info(f"[CollectionAutoPilot] Completed for collection_id={collection_id}, batch_id={batch_id}")
 
 
 @shared_task(name="check_periodic_schedules")
