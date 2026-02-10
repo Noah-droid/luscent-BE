@@ -11,14 +11,13 @@ import traceback
 
 logger = logging.getLogger(__name__)
 
-@shared_task(bind=True, soft_time_limit=120)
-def import_swagger_task(self, project_id, swagger_url, collection_name=None, skip_validation=False):
+@shared_task(name="import_swagger", bind=True, soft_time_limit=120)
+def import_swagger_task(self, collection_id, swagger_url, skip_validation=False):
     """
-    Celery task to fetch and import swagger spec into a new collection.
+    Celery task to fetch and import swagger spec into an existing collection.
     """
-    project = get_object_or_404(Project, id=project_id)
-    if not collection_name:
-        collection_name = f"Swagger Import - {swagger_url[:30]}"
+    coll = get_object_or_404(Collection, id=collection_id)
+    project = coll.project
 
     try:
         raw_text = fetch_spec_from_url(swagger_url)
@@ -29,13 +28,10 @@ def import_swagger_task(self, project_id, swagger_url, collection_name=None, ski
             if not valid:
                 return {"error": "Spec validation failed", "detail": validation_error}
 
-        # Create Collection
-        coll = Collection.objects.create(
-            project=project, 
-            name=collection_name, 
-            source="swagger",
-            base_url=extract_base_url(spec)
-        )
+        # Update Collection metadata
+        coll.source = "swagger"
+        coll.base_url = extract_base_url(spec)
+        coll.save()
 
         parse_result = parse_paths_to_endpoints(spec, project_obj=project)
         created, errors = 0, parse_result.get("errors", [])
@@ -43,13 +39,16 @@ def import_swagger_task(self, project_id, swagger_url, collection_name=None, ski
 
         for e in endpoints:
             try:
-                Endpoint.objects.create(
+                # Use update_or_create to avoid duplicates if re-imported
+                Endpoint.objects.update_or_create(
                     collection=coll,
                     method=e["method"],
                     url=e["full_url"] or e["path"],
-                    name=e["name"],
-                    description=e.get("description", ""),
-                    request_body=e.get("requestBody") or {}
+                    defaults={
+                        "name": e["name"],
+                        "description": e.get("description", ""),
+                        "request_body": e.get("requestBody") or {}
+                    }
                 )
                 created += 1
             except Exception as ee:
@@ -62,35 +61,33 @@ def import_swagger_task(self, project_id, swagger_url, collection_name=None, ski
         return {"error": str(exc)}
 
 
-@shared_task(bind=True, soft_time_limit=300)
-def import_crawler_task(self, project_id, start_url, collection_name=None, max_pages=50):
+@shared_task(name="import_crawler", bind=True, soft_time_limit=300)
+def import_crawler_task(self, collection_id, start_url, max_pages=50):
     """
-    Celery task to crawl a website and import found endpoints into a collection.
+    Celery task to crawl a website and import found endpoints into an existing collection.
     """
     from .crawler import crawl_url
-    project = get_object_or_404(Project, id=project_id)
-    if not collection_name:
-        collection_name = f"Crawler Import - {start_url}"
+    coll = get_object_or_404(Collection, id=collection_id)
 
     try:
         endpoints = crawl_url(start_url, max_pages=max_pages)
         
-        coll = Collection.objects.create(
-            project=project, 
-            name=collection_name, 
-            source="crawler",
-            base_url=start_url
-        )
+        # Update Collection metadata
+        coll.source = "crawler"
+        coll.base_url = start_url
+        coll.save()
 
         created_count = 0
         for e in endpoints:
             try:
-                Endpoint.objects.create(
+                Endpoint.objects.update_or_create(
                     collection=coll,
                     method=e["method"],
                     url=e["full_url"],
-                    name=e["name"],
-                    description=e.get("description", "")
+                    defaults={
+                        "name": e["name"],
+                        "description": e.get("description", "")
+                    }
                 )
                 created_count += 1
             except Exception:

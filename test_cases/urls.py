@@ -20,9 +20,9 @@ urlpatterns = [
     path("<int:test_case_id>/runs/", TestRunListView.as_view(), name="testcase-runs"),
     path("runs/", TestRunListView.as_view(), name="testrun-list"),
     path("runs/<int:pk>/", TestRunDetailView.as_view(), name="testrun-detail"),
-    path("projects/<int:project_id>/status/", ProjectStatusView.as_view(), name="project-status"),
-    path("projects/<int:project_id>/auto-pilot/", ProjectAutoPilotView.as_view(), name="project-auto-pilot"),
-    path("collections/<int:collection_id>/status/", CollectionStatusView.as_view(), name="collection-status"),
-    path("collections/<int:collection_id>/auto-pilot/", CollectionAutoPilotView.as_view(), name="collection-auto-pilot"),
+    path("projects/<uuid:project_id>/status/", ProjectStatusView.as_view(), name="project-status"),
+    path("projects/<uuid:project_id>/auto-pilot/", ProjectAutoPilotView.as_view(), name="project-auto-pilot"),
+    path("collections/<uuid:collection_id>/status/", CollectionStatusView.as_view(), name="collection-status"),
+    path("collections/<uuid:collection_id>/auto-pilot/", CollectionAutoPilotView.as_view(), name="collection-auto-pilot"),
 ]
 

@@ -17,8 +17,10 @@ class RunnerService:
     RUNNER_IMAGE = "qai-runner-python:latest"
 
     def execute_test(self, test_case_id, override_url=None, batch_id=None, triggered_by="manual"):
+        logger.info(f"[RunnerService] Starting test execution for test_case_id={test_case_id}, batch_id={batch_id}, triggered_by={triggered_by}")
         try:
             test_case = TestCase.objects.get(id=test_case_id)
+            logger.info(f"[RunnerService] Found test case: {test_case.name} (runner_type={test_case.runner_type})")
         except TestCase.DoesNotExist:
             logger.error(f"TestCase {test_case_id} not found.")
             return None
@@ -28,7 +30,7 @@ class RunnerService:
             test_case=test_case, 
             status="running",
             batch_id=batch_id,
-            triggered_by=triggered_by
+            triggered_by=triggered_by,
         )
         
         try:
@@ -206,9 +208,11 @@ class RunnerService:
         # Check for Remote Runner (Production Mode)
         remote_url = getattr(settings, 'QAI_RUNNER_URL', None)
         if remote_url:
+            logger.info(f"[RunnerService] Using REMOTE runner at: {remote_url}")
             return self._run_remote(remote_url, script_content, env_vars, timeout)
 
         # Check for Local Docker (Development Mode)
+        logger.info("[RunnerService] Remote runner not configured, checking for local Docker...")
         if not shutil.which("docker"):
             logger.warning("Docker not found. Falling back to host execution (UNSAFE).")
             return self._run_on_host(script_content, env_vars, timeout)
@@ -243,7 +247,7 @@ class RunnerService:
 
             # Add image and script to execute
             # We must explicitly call 'python' because the Dockerfile default is now the API server
-            cmd.extend([self.RUNNER_IMAGE, "python", "test_script.py"])
+            cmd.extend([self.RUNNER_IMAGE, "python3", "test_script.py"])
 
             start_time = time.time()
             process = subprocess.run(
@@ -273,6 +277,8 @@ class RunnerService:
         """
         secret = getattr(settings, 'QAI_RUNNER_SECRET', "")
         
+        logger.info(f"[RemoteRunner] Sending request to {url}/execute with timeout={timeout}s")
+        
         try:
             start_time = time.time()
             response = requests.post(
@@ -286,10 +292,15 @@ class RunnerService:
                 timeout=timeout + 5
             )
             
+            logger.info(f"[RemoteRunner] Response status: {response.status_code}")
+            
             if response.status_code != 200:
-                return {"error": f"Remote runner error: {response.text}", "returncode": -1}
+                error_msg = f"Remote runner error: {response.text}"
+                logger.error(f"[RemoteRunner] {error_msg}")
+                return {"error": error_msg, "returncode": -1}
 
             data = response.json()
+            logger.info(f"[RemoteRunner] Execution completed successfully in {int((time.time() - start_time) * 1000)}ms")
             
             # If there's a screenshot, we need to save it locally for artifact processing
             temp_dir = None
@@ -307,8 +318,18 @@ class RunnerService:
                 "temp_dir": temp_dir
             }
 
+        except requests.exceptions.Timeout as e:
+            error_msg = f"Remote connection timeout after {timeout}s: {str(e)}"
+            logger.error(f"[RemoteRunner] {error_msg}")
+            return {"error": error_msg, "returncode": -1}
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Remote connection failed: {str(e)}"
+            logger.error(f"[RemoteRunner] {error_msg}")
+            return {"error": error_msg, "returncode": -1}
         except Exception as e:
-            return {"error": f"Remote connection failed: {str(e)}", "returncode": -1}
+            error_msg = f"Unexpected error: {str(e)}"
+            logger.error(f"[RemoteRunner] {error_msg}")
+            return {"error": error_msg, "returncode": -1}
 
     def _run_on_host(self, script_content, env_vars=None, timeout=60):
         """Standard subprocess execution (Original logic)"""
@@ -319,7 +340,7 @@ class RunnerService:
         try:
             start = time.time()
             process = subprocess.run(
-                ["python", tmp_path],
+                ["python3", tmp_path],
                 env={**(env_vars or {}), "PATH": os.environ.get("PATH", "")},
                 capture_output=True,
                 text=True,

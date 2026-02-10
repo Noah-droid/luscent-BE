@@ -139,6 +139,16 @@ class TestRun(models.Model):
     batch_id = models.UUIDField(null=True, blank=True, db_index=True, help_text="Group ID for batch executions")
     triggered_by = models.CharField(max_length=50, choices=[("manual", "Manual"), ("ai", "AI Auto-Pilot"), ("webhook", "Webhook"), ("scheduled", "Scheduled")], default="manual")
     
+    # New: Hybrid/Self-Hosted Support
+    # assigned_runner = models.ForeignKey(
+    #     'remote_runners.RemoteRunner', 
+    #     on_delete=models.SET_NULL, 
+    #     null=True, 
+    #     blank=True, 
+    #     related_name="assigned_runs",
+    #     help_text="The remote runner assigned to execute this test"
+    # )
+
     def __str__(self):
         return f"Run {self.id} for {self.test_case.name} - {self.status}"
 

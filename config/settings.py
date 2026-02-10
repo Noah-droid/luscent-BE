@@ -56,7 +56,7 @@ INSTALLED_APPS = [
     'test_cases',
     'billing',
     'encrypted_model_fields',
-    # 'remote_runners',
+
 ]
 
 # Custom user model
@@ -131,20 +131,24 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # }
 
 
+
+
 DATABASES = {
-  'default': {
-    'ENGINE': 'django.db.backends.postgresql',
-    'NAME': config('PGDATABASE'),
-    'USER': config('PGUSER'),
-    'PASSWORD': config('PGPASSWORD'),
-    'HOST': config('PGHOST'),
-    'PORT': config('PGPORT', 5432),
-    'CONN_MAX_AGE': 600,
-    'OPTIONS': {
-      'sslmode': 'require',
-    },
-  }
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': config('PGDATABASE'),
+        'USER': config('PGUSER'),
+        'PASSWORD': config('PGPASSWORD'),
+        'HOST': config('PGHOST'),
+        'PORT': config('PGPORT', default=5432, cast=int),
+        'CONN_MAX_AGE': 600,
+    }
 }
+
+# SSL Configuration
+if config('DB_SSL_REQUIRE', default=True, cast=bool):
+    DATABASES['default']['OPTIONS'] = {'sslmode': 'require'}
+
 
 
 # Password validation
@@ -224,11 +228,12 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
+CELERY_IMPORTS = ('test_cases.tasks', 'collection.tasks')
 
 CELERY_BEAT_SCHEDULE = {
     'check-periodic-test-schedules': {
-        'task': 'test_cases.tasks.check_periodic_schedules_task',
-        'schedule': 60.0, # Run every minute
+        'task': 'check_periodic_schedules',
+        'schedule': 120.0, # Run every 2 minutes
     },
 }
 

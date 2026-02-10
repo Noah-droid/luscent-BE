@@ -18,18 +18,21 @@ class AITestGenerator:
         self.max_tokens = 8192 
         self.temperature = 0.7
 
-    def generate_draft_plan(self, endpoint_item, runner_type="http", category="functional", layer="backend", scenarios=None, project_description="", user_story=None):
+    def generate_draft_plan(self, endpoint_item, allowed_runners=None, category="functional", layer="backend", scenarios=None, project_description="", user_story=None):
         """
         Generate test case drafts for a given Endpoint (url/method) object.
         Returns a list of dicts suitable for creating TestCase objects.
         """
+        if allowed_runners is None:
+            allowed_runners = ["http"]
+
         api_key = self.openai_api_key if self.provider == "openai" else self.gemini_api_key
         
         if not api_key or api_key == "PLACEHOLDER":
             logger.warning(f"No API key found for provider {self.provider}. Skipping AI generation.")
             return []
 
-        prompt = self._construct_prompt(endpoint_item, runner_type, category, layer, scenarios, project_description, user_story)
+        prompt = self._construct_prompt(endpoint_item, allowed_runners, category, layer, scenarios, project_description, user_story)
         
         try:
             response = self._call_llm(prompt)
@@ -88,7 +91,7 @@ class AITestGenerator:
             logger.error(f"Refinement failed: {e}")
             raise e
 
-    def _construct_prompt(self, item, runner_type, category, layer, scenarios, project_description="", user_story=None):
+    def _construct_prompt(self, item, allowed_runners, category, layer, scenarios, project_description="", user_story=None):
         # Build context about the endpoint
         context = {
             "method": item.method,
@@ -142,14 +145,43 @@ class AITestGenerator:
         else:
             scenario_instruction = "Generate 3 diverse test cases covering happy paths and common error validation."
 
+        runner_instruction = f"""
+        AVAILABLE RUNNERS: {json.dumps(allowed_runners)}
+        
+        Decide the best 'runner_type' for each test case from the available runners.
+        - Use 'browser': ONLY if the endpoint serves HTML, requires a UI flow, or if testing frontend interaction is critical.
+        - Use 'http': For standard API logic, JSON responses, and backend validation.
+        - Use 'load': ONLY if the category is 'performance' or 'load'.
+        """
+        
+        if "browser" in allowed_runners:
+             runner_instruction += """
+        For 'browser' tests, you MUST generate a valid Python Playwright script in the 'test_script' field.
+        The script should visit the page (if applicable) or perform the action.
+        CRITICAL: The runner provides a path in os.environ['SCREENSHOT_PATH']. 
+        If the test fails OR if you want to capture state, you MUST save a screenshot to this path using:
+        `page.screenshot(path=os.environ['SCREENSHOT_PATH'])`
+        """
+
+        if "load" in allowed_runners:
+            runner_instruction += """
+        For 'load' tests, generate a Python Locust task in 'test_script' field.
+        """
+
+        runner_instruction += """
+        For 'http' tests, focus on 'headers', 'query_params', 'body' and 'assertions'.
+        """
+
         instructions = f"""
         You are an expert QA Automation Engineer. 
         Generate test cases for the following API endpoint/feature.
 
         Context:
+        - Project: {project_description or 'N/A'}
         - Type: {category} Testing
         - Layer: {layer}
-        - Runner: {runner_type}
+        
+        {runner_instruction}
         
         {story_instruction}
         
@@ -168,6 +200,7 @@ class AITestGenerator:
         
         COLLECTION CONTEXT (Learn from these patterns):
         This endpoint is part of the "{item.collection.name}" collection.
+        Collection Description: {item.collection.description or 'No description provided.'}
         
         Previous tests in this collection show these patterns:
         - Auth Type: {collection_context['auth_type']}
@@ -182,34 +215,6 @@ class AITestGenerator:
         Use similar assertion types, header structures, and naming conventions.
         """
 
-        if runner_type == "browser":
-            instructions += """
-        For 'browser' tests, you MUST generate a valid Python Playwright script in the 'test_script' field.
-        The script should visit the page (if applicable) or perform the action.
-        
-        CRITICAL: The runner provides a path in os.environ['SCREENSHOT_PATH']. 
-        If the test fails OR if you want to capture state, you MUST save a screenshot to this path using:
-        `page.screenshot(path=os.environ['SCREENSHOT_PATH'])`
-        
-        Example format item:
-        {
-            "name": "Browser Login",
-            "description": "...",
-            "runner_type": "browser",
-            "test_script": "import os\npage.goto('url')\npage.fill('#user', 'test')\nif 'Error' in page.content():\n    page.screenshot(path=os.environ['SCREENSHOT_PATH'])\n    raise Exception('Login failed')",
-            "priority": "high"
-        }
-        """
-        elif runner_type == "load":
-            instructions += """
-        For 'load' tests, generate a Python Locust task in 'test_script' field.
-        """
-        else:
-            # Default HTTP
-            instructions += """
-        For 'http' tests, focus on 'headers', 'query_params', 'body' and 'assertions'.
-        """
-
         instructions += """
         Output strictly valid JSON list of objects. No markdown. No comments.
         Use double quotes for all keys and strings.
@@ -222,7 +227,7 @@ class AITestGenerator:
             "name": "Test Name",
             "description": "What this tests",
             "steps_summary": "1. Step one. 2. Step two. 3. Expected Result.",
-            "runner_type": "{runner_type}",
+            "runner_type": "CHOSEN_RUNNER_TYPE",
             "category": "{category}",
             "layer": "{layer}",
             "priority": "high/medium/low",

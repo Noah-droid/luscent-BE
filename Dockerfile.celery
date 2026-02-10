@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Set environment variables
 # PYTHONDONTWRITEBYTECODE: Prevents Python from writing .pyc files to disk
@@ -20,7 +20,7 @@ WORKDIR /app
 # Install Python dependencies
 # We copy requirements.txt first to leverage Docker cache
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --default-timeout=100 -r requirements.txt
 
 # Copy the rest of the application code
 COPY . .
@@ -32,4 +32,4 @@ USER celeryuser
 
 
 
-CMD ["celery", "-A", "config", "worker", "--loglevel=info", "--concurrency=2"]
+CMD ["celery", "-A", "config", "worker", "--beat", "--loglevel=info", "--concurrency=2"]
