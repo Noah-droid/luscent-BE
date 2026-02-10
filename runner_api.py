@@ -9,14 +9,34 @@ import time
 import json
 import uuid
 
-app = FastAPI(title="Luscent Remote Sandbox")
+from fastapi.middleware.cors import CORSMiddleware
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("runner")
+
+app = FastAPI(title="QAi Remote Sandbox")
+
+# CORS Fix
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Simple API Key security (set this in Cloud Run env)
 API_KEY = os.environ.get("QAI_RUNNER_SECRET")
 api_key_header = APIKeyHeader(name="X-QAi-Secret")
 
 async def get_api_key(api_key: str = Security(api_key_header)):
+    if not API_KEY:
+        logger.warning("QAI_RUNNER_SECRET not set in environment! Allowing all requests.")
+        return api_key
     if api_key != API_KEY:
+        logger.error(f"Invalid API Key attempt: {api_key}")
         raise HTTPException(status_code=403, detail="Invalid API Key")
     return api_key
 
@@ -29,6 +49,7 @@ class TestRequest(BaseModel):
 async def execute_test(req: TestRequest, api_key: str = Depends(get_api_key)):
     # 1. Prepare Workspace
     run_id = str(uuid.uuid4())
+    logger.info(f"Starting execution {run_id}. Env vars: {list(req.env_vars.keys())}")
     temp_dir = tempfile.mkdtemp(prefix=f"run_{run_id}_")
     script_path = os.path.join(temp_dir, "test_script.py")
     
@@ -54,6 +75,7 @@ async def execute_test(req: TestRequest, api_key: str = Depends(get_api_key)):
         )
         
         duration = int((time.time() - start_time) * 1000)
+        logger.info(f"Execution {run_id} finished in {duration}ms with returncode {process.returncode}")
 
         # 3. Handle Artifacts (Screenshots)
         has_screenshot = os.path.exists(env["SCREENSHOT_PATH"])
