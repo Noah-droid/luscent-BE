@@ -1,18 +1,16 @@
-# Exclude common dev artifacts
-__pycache__/
-*.pyc
-.git/
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.db.sqlite3
 .env
-db.sqlite3
+.git
+.gitignore
+.vscode
 env/
 venv/
-.vscode/
-.idea/
-
-# Common ignore patterns
+node_modules/
+frontend/node_modules/
 *.log
-*.pot
-*.pyo
-.pytest_cache/
-.coverage
-htmlcov/
+dist/
+pyarmor.log

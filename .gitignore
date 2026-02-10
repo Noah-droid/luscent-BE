@@ -8,4 +8,12 @@ __pycache__
 remote_runners/
 runner/
 Dockerfile.hybrid
+hybrid_runner/
+docker/
+runner_config.json
+mock_swagger.json
+frontend/
+docker-compose.yml
+
+
 
