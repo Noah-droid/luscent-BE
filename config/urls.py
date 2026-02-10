@@ -50,5 +50,4 @@ urlpatterns = [
     path('api/collections/', include('collection.urls')),
     path('api/test-cases/', include('test_cases.urls')),
     path('api/billing/', include('billing.urls')),
-    # path('api/runners/', include('remote_runners.urls')),
 ]

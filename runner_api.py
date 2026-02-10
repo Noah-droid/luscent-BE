@@ -45,7 +45,7 @@ async def execute_test(req: TestRequest, api_key: str = Depends(get_api_key)):
         
         # We run as the 'qairunner' user if possible, but Cloud Run handles most of this
         process = subprocess.run(
-            ["python", "test_script.py"],
+            ["python3", "test_script.py"],
             cwd=temp_dir,
             env=env,
             capture_output=True,
