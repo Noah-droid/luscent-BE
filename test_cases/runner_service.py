@@ -212,7 +212,7 @@ class RunnerService:
             return self._run_remote(remote_url, script_content, env_vars, timeout)
 
         # Check for Local Docker (Development Mode)
-        logger.info("[RunnerService] Remote runner not configured, checking for local Docker...")
+        logger.info("[RunnerService] Remote runner (QAI_RUNNER_URL) not configured. Checking for local Docker...")
         if not shutil.which("docker"):
             logger.warning("Docker not found. Falling back to host execution (UNSAFE).")
             return self._run_on_host(script_content, env_vars, timeout)
@@ -276,6 +276,8 @@ class RunnerService:
         Sends the test to a remote Cloud Run instance.
         """
         secret = getattr(settings, 'QAI_RUNNER_SECRET', "")
+        if not secret:
+            logger.warning("[RemoteRunner] QAI_RUNNER_SECRET is empty. Request might be rejected.")
         
         logger.info(f"[RemoteRunner] Sending request to {url}/execute with timeout={timeout}s")
         
