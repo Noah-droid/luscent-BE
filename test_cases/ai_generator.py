@@ -46,7 +46,50 @@ class AITestGenerator:
             logger.error(f"AI Generation failed ({self.provider}): {e}")
             return []
 
-    # ... (refine_test method remains unchanged) ...
+    def refine_test(self, draft_test, instruction, collection_item=None):
+        """
+        Refines a single test object based on user instruction.
+        """
+        api_key = self.openai_api_key if self.provider == "openai" else self.gemini_api_key
+        if not api_key: return None
+
+        context_block = ""
+        if endpoint_item:
+            context = {
+                "method": endpoint_item.method,
+                "url": endpoint_item.url,
+                "description": endpoint_item.description,
+                "request_body_schema": endpoint_item.request_body,
+                "query_params": endpoint_item.query_params,
+            }
+            context_block = f"CONTEXT (The API Endpoint being tested):\n{json.dumps(context, indent=2)}\n"
+
+        prompt = f"""
+        You are a QA Automation Expert. The user wants to modify this generated test case.
+        
+        {context_block}
+        
+        Current Test JSON:
+        {json.dumps(draft_test, indent=2)}
+        
+        User Instruction: "{instruction}"
+        
+        Task:
+        1. Modify the JSON fields (especially 'test_script' or parameters) to satisfy the instruction.
+        2. Ensure the test remains valid for the provided Endpoint Context.
+        3. Update the 'steps_summary' to reflect changes.
+        4. Maintain strict JSON validity.
+        
+        Output strictly the updated JSON object. No markdown.
+        """
+        
+        try:
+            response = self._call_llm(prompt)
+            clean_json = response.replace("```json", "").replace("```", "").strip()
+            return json.loads(clean_json)
+        except Exception as e:
+            logger.error(f"Refinement failed: {e}")
+            raise e
 
     def _construct_prompt(self, item, allowed_runners, category, layer, scenarios, project_description="", user_story=None):
         # Build context about the endpoint
