@@ -366,6 +366,7 @@ class RunTestView(APIView):
                 logger.error(f"Celery error: {e}. Falling back to sync run.")
         
         runner = RunnerService()
+        result = runner.execute_test(test_case.id)
         return Response({
             "status": result.status,
             "response_status": result.response_status,
@@ -713,21 +714,29 @@ class CollectionAutoPilotView(APIView):
         
         from .tasks import collection_auto_pilot_task
         
-        collection_auto_pilot_task.delay(
-            collection_id=str(collection.id),
-            user_id=request.user.id,
-            scenarios=scenarios,
-            batch_id=str(batch_id),
-            user_story=user_story,
-            runner_types=runner_types,
-            categories=categories,
-            layer=layer,
-            use_visual_ai=use_visual_ai
-        )
+        logger.info(f"[CollectionAutoPilotView] Triggering task for collection {collection_id} with batch_id {batch_id}")
+        
+        try:
+            task = collection_auto_pilot_task.delay(
+                collection_id=str(collection.id),
+                user_id=request.user.id,
+                scenarios=scenarios,
+                batch_id=str(batch_id),
+                user_story=user_story,
+                runner_types=runner_types,
+                categories=categories,
+                layer=layer,
+                use_visual_ai=use_visual_ai
+            )
+            logger.info(f"[CollectionAutoPilotView] Task {task.id} queued successfully")
+        except Exception as e:
+            logger.error(f"[CollectionAutoPilotView] Failed to queue task: {e}")
+            return Response({"error": "Failed to queue background task"}, status=500)
 
         return Response({
             "message": "Collection Auto-Pilot started successfully",
             "batch_id": batch_id,
+            "task_id": task.id,
             "description": f"Generating and running tests for all endpoints in collection '{collection.name}'."
         }, status=status.HTTP_202_ACCEPTED)
 
