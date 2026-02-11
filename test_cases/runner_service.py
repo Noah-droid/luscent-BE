@@ -16,7 +16,7 @@ class RunnerService:
     # runner image
     RUNNER_IMAGE = "qai-runner-python:latest"
 
-    def execute_test(self, test_case_id, override_url=None, batch_id=None, triggered_by="manual"):
+    def execute_test(self, test_case_id, override_url=None, batch_id=None, triggered_by="manual", send_notification=True):
         logger.info(f"[RunnerService] Starting test execution for test_case_id={test_case_id}, batch_id={batch_id}, triggered_by={triggered_by}")
         try:
             test_case = TestCase.objects.get(id=test_case_id)
@@ -57,8 +57,9 @@ class RunnerService:
                 logger.error(f"Failed to increment test_runs_count: {e}")
             
         
-            from notifications.services import send_test_run_report
-            send_test_run_report(test_run)
+            if send_notification:
+                from notifications.services import send_test_run_report
+                send_test_run_report(test_run)
             
             return test_run
             
@@ -69,8 +70,9 @@ class RunnerService:
             test_run.save()
             
 
-            from notifications.services import send_test_run_report
-            send_test_run_report(test_run)
+            if send_notification:
+                from notifications.services import send_test_run_report
+                send_test_run_report(test_run)
             
             return test_run
 
@@ -158,12 +160,30 @@ class RunnerService:
         if "error" in result:
              test_run.status = "error"
              test_run.error_message = result["error"]
+             test_run.logs = result.get("stderr", "")
              test_run.save()
              return
+
+        # Always save logs from stdout/stderr for debugging
+        test_run.logs = f"STDOUT:\n{result.get('stdout', '')}\n\nSTDERR:\n{result.get('stderr', '')}"
 
         try:
             # The script outputs a single JSON line
             stdout_data = result.get("stdout", "").strip()
+            
+            # Check for return code first
+            if result.get("returncode", 0) != 0:
+                test_run.status = "error"
+                test_run.error_message = f"Sandbox execution failed with code {result.get('returncode')}. See logs for details."
+                test_run.save()
+                return
+
+            if not stdout_data:
+                test_run.status = "error"
+                test_run.error_message = "Sandbox returned empty output. Check script compatibility."
+                test_run.save()
+                return
+
             # If there's multiple lines (from prints), take the last one
             last_line = stdout_data.split('\n')[-1]
             http_data = json.loads(last_line)
@@ -193,7 +213,7 @@ class RunnerService:
         except Exception as e:
             test_run.status = "error"
             test_run.error_message = f"Failed to parse sandbox output: {str(e)}"
-            test_run.logs = result.get("stdout")
+            logger.error(f"Sandbox parse error: {str(e)}. Raw output: {result.get('stdout')}")
         
         test_run.save()
 
