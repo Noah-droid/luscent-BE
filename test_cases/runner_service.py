@@ -116,6 +116,34 @@ class RunnerService:
         params = {**endpoint.query_params, **test_case.query_params}
         body = test_case.body if test_case.body else endpoint.request_body
         
+        #  VARIABLE SUBSTITUTION (Stateful Flow)
+        # Look for variables in the batch context if batch_id is present
+        batch_vars = {}
+        if test_run.batch_id:
+            previous_runs = TestRun.objects.filter(batch_id=test_run.batch_id).exclude(id=test_run.id)
+            for prev in previous_runs:
+                if prev.extracted_data:
+                    batch_vars.update(prev.extracted_data)
+        
+        # Helper to replace {{var}} in strings or nested dicts
+        def replace_vars(data):
+            if isinstance(data, str):
+                import re
+                def sub_match(match):
+                    var_name = match.group(1)
+                    return str(batch_vars.get(var_name, match.group(0)))
+                return re.sub(r"\{\{([^}]+)\}\}", sub_match, data)
+            elif isinstance(data, dict):
+                return {k: replace_vars(v) for k, v in data.items()}
+            elif isinstance(data, list):
+                return [replace_vars(v) for v in data]
+            return data
+
+        full_url = replace_vars(full_url)
+        headers = replace_vars(headers)
+        params = replace_vars(params)
+        body = replace_vars(body)
+
         #  Generate the execution script
         # We use a list and join it to be 100% certain there are NO indentation issues.
         script_lines = [
@@ -213,6 +241,26 @@ class RunnerService:
                 test_run.response_body = http_data['body']
                 test_run.response_time_ms = http_data['duration']
                 
+                # 3. DATA EXTRACTION
+                # Check if test case defined any variables to extract from the response
+                # Example assertion: {"type": "extract", "field": "$.id", "variable": "project_id"}
+                for assertion in test_case.assertions:
+                    if assertion.get("type") == "extract":
+                        from jsonpath_ng import parse
+                        try:
+                            json_body = json.loads(test_run.response_body) if isinstance(test_run.response_body, str) else test_run.response_body
+                            jsonpath_expr = parse(assertion.get("field", "$"))
+                            matches = jsonpath_expr.find(json_body)
+                            if matches:
+                                var_name = assertion.get("variable", "unknown")
+                                var_value = matches[0].value
+                                if not test_run.extracted_data:
+                                    test_run.extracted_data = {}
+                                test_run.extracted_data[var_name] = var_value
+                                logger.info(f"[Runner] Extracted variable: {var_name}={var_value}")
+                        except Exception as ex:
+                            logger.warning(f"Failed to extract variable {assertion.get('variable')}: {ex}")
+
         except Exception as e:
             test_run.status = "error"
             test_run.error_message = f"Failed to parse sandbox output: {str(e)}"

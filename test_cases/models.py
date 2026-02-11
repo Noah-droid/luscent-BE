@@ -139,6 +139,9 @@ class TestRun(models.Model):
     batch_id = models.UUIDField(null=True, blank=True, db_index=True, help_text="Group ID for batch executions")
     triggered_by = models.CharField(max_length=50, choices=[("manual", "Manual"), ("ai", "AI Auto-Pilot"), ("webhook", "Webhook"), ("scheduled", "Scheduled")], default="manual")
     
+    # State Sharing: Data extracted from response to be shared with subsequent tests in the same batch
+    extracted_data = models.JSONField(default=dict, blank=True, help_text="Variables extracted from this run for use in the batch")
+    
     # New: Hybrid/Self-Hosted Support
     # assigned_runner = models.ForeignKey(
     #     'remote_runners.RemoteRunner', 
