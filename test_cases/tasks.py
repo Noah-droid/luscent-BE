@@ -9,12 +9,12 @@ logger.info("TEST_CASES TASKS MODULE LOADING...")
 @shared_task(
     name="run_test_case",
     bind=True,
-    time_limit=180,        # Hard timeout: 3 minutes (kills task)
-    soft_time_limit=150,   # Soft timeout: 2.5 minutes (raises exception)
-    max_retries=2,         # Retry up to 2 times on failure
-    default_retry_delay=10 # Wait 10 seconds between retries
+    time_limit=180,
+    soft_time_limit=150,
+    max_retries=2,
+    default_retry_delay=10
 )
-def run_test_case_task(self, test_case_id, override_url=None, batch_id=None, triggered_by="manual"):
+def run_test_case_task(self, test_case_id, override_url=None, batch_id=None, triggered_by="manual", send_notification=True):
     """
     Execute a test case with timeout and retry logic.
     
@@ -35,7 +35,8 @@ def run_test_case_task(self, test_case_id, override_url=None, batch_id=None, tri
             test_case_id, 
             override_url=override_url, 
             batch_id=batch_id, 
-            triggered_by=triggered_by
+            triggered_by=triggered_by,
+            send_notification=send_notification
         )
         logger.info(f"[CeleryTask] run_test_case_task completed successfully for test_case_id={test_case_id}")
         return result
@@ -126,10 +127,14 @@ def project_auto_pilot_task(project_id, user_id, scenarios, batch_id, user_story
                             run_test_case_task.delay(
                                 test_case.id, 
                                 batch_id=batch_id, 
-                                triggered_by="ai"
+                                triggered_by="ai",
+                                send_notification=False # Skip individual emails
                             )
                     except Exception as e:
                         logger.error(f"Auto-Pilot failed to create/run test for {endpoint.name}: {e}")
+    
+    # Schedule batch report 
+    send_batch_report_task.apply_async((str(batch_id), user.id), countdown=300) # 5m delay as AI gen takes time
 
 
 @shared_task(name="collection_auto_pilot", time_limit=1800)  # 30 mins max
@@ -224,14 +229,40 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
                         run_test_case_task.delay(
                             test_case.id, 
                             batch_id=batch_id, 
-                            triggered_by="ai"
+                            triggered_by="ai",
+                            send_notification=False # Skip individual emails
                         )
                     else:
                         logger.warning(f"[CollectionAutoPilot] Insufficient tokens to run test: {test_case.name}")
                 except Exception as e:
                     logger.error(f"Collection Auto-Pilot failed to create/run test for {endpoint.name}: {e}")
     
+    # Schedule batch report
+    send_batch_report_task.apply_async((str(batch_id), user.id), countdown=180) # 3m delay
+    
     logger.info(f"[CollectionAutoPilot] Completed for collection_id={collection_id}, batch_id={batch_id}")
+    
+    logger.info(f"[CollectionAutoPilot] Completed for collection_id={collection_id}, batch_id={batch_id}")
+
+
+@shared_task(name="send_batch_report_task")
+def send_batch_report_task(batch_id, user_id):
+    """
+    Asynchronous task to collect results and send a single batch report.
+    Wait a bit to ensure all tasks in the batch have likely finished.
+    """
+    import time
+    from users.models import User
+    from .models import TestRun
+    from notifications.services import send_batch_report
+    
+    # Wait for completion (simple polling for 30s max)
+    user = User.objects.get(id=user_id)
+    
+    # Give it some time for the last tasks to finish
+    time.sleep(10) 
+    
+    send_batch_report(batch_id, user)
 
 
 @shared_task(name="check_periodic_schedules")
@@ -239,50 +270,58 @@ def check_periodic_schedules_task():
     """
     Background worker that runs every minute to scan for collections
     that are due for a 'period check' (uptime monitoring).
+    Optimized: Only runs HIGH priority or SMOKE tests to save tokens and avoid spam.
     """
     from collection.models import Collection
     from billing.services import deduct_tokens, calculate_test_cost
+    from django.db.models import Q
     import uuid
 
     now = timezone.now()
-    # Find all scheduled collections
     scheduled_collections = Collection.objects.filter(is_scheduled=True)
 
     for collection in scheduled_collections:
-        # Check if it's due
-        # Logic: (now - last_run) >= interval_minutes
         is_due = False
         if not collection.last_scheduled_run_at:
             is_due = True
         else:
             diff = now - collection.last_scheduled_run_at
-            if diff.total_seconds() / 60 >= collection.schedule_interval - 0.1: # 0.1 buffer for slight delays
+            if diff.total_seconds() / 60 >= collection.schedule_interval - 0.1:
                 is_due = True
 
         if is_due:
             logger.info(f"Triggering scheduled period check for: {collection.name}")
             batch_id = uuid.uuid4()
             endpoints = collection.endpoints.all()
+            user = collection.project.user
             
+            run_count = 0
             for endpoint in endpoints:
-                for test_case in endpoint.test_cases.all():
-                    # Billing check for the run
-                    user = collection.project.user
+                # OPTIMIZATION: Only run high-priority tests for scheduled checks
+                # Or the first one if none are high priority
+                test_cases = endpoint.test_cases.filter(Q(priority='high') | Q(priority='critical') | Q(category='smoke'))
+                if not test_cases.exists():
+                    test_cases = endpoint.test_cases.all()[:1] # Fallback to first test
+
+                for test_case in test_cases:
                     cost = calculate_test_cost(test_case.runner_type)
-                    
                     if deduct_tokens(user, cost, f"Scheduled Check: {test_case.name}"):
                         run_test_case_task.delay(
                             test_case.id,
                             batch_id=batch_id,
-                            triggered_by="scheduled"
+                            triggered_by="scheduled",
+                            send_notification=False # We will send a batch report instead
                         )
+                        run_count += 1
             
-            # Update last run timestamp
+            # If any tests were triggered, schedule a batch report
+            if run_count > 0:
+                 send_batch_report_task.apply_async((str(batch_id), user.id), countdown=60) # Send report in 60s
+            
             collection.last_scheduled_run_at = now
             collection.save(update_fields=['last_scheduled_run_at'])
 
-# LEGACY SHIM: Support old task name for environments still using the old scheduler
+# LEGACY SHIM
 @shared_task(name="test_cases.tasks.check_periodic_schedules_task")
 def legacy_check_periodic_schedules_task():
-    logger.info("Legacy periodic task name triggered, redirecting to new name.")
     return check_periodic_schedules_task()

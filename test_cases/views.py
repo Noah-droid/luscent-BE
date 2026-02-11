@@ -313,12 +313,16 @@ class BatchCreateTestsView(APIView):
                 for test in created_tests:
                     if HAS_CELERY:
                         try:
-                            run_test_case_task.delay(test.id, batch_id=batch_id, triggered_by="manual")
+                            run_test_case_task.delay(test.id, batch_id=batch_id, triggered_by="manual", send_notification=False)
                         except Exception as e:
                             logger.error(f"Failed to queue task: {e}. Falling back to sync.")
                             RunnerService().execute_test(test.id, batch_id=batch_id, triggered_by="manual")
                     else:
                         RunnerService().execute_test(test.id, batch_id=batch_id, triggered_by="manual")
+                
+                # Schedule batch report
+                from .tasks import send_batch_report_task
+                send_batch_report_task.apply_async((batch_id, request.user.id), countdown=60)
             else:
                 balance = request.user.token_balance
                 if balance <= 0:
@@ -450,9 +454,14 @@ class TriggerTestRunView(APIView):
                     tc.id, 
                     override_url=target_url, 
                     batch_id=batch_id, 
-                    triggered_by="webhook"
+                    triggered_by="webhook",
+                    send_notification=False
                 )
                 run_ids.append(task.id)
+            
+            # Schedule batch report
+            from .tasks import send_batch_report_task
+            send_batch_report_task.apply_async((batch_id, request.user.id), countdown=120)
                 
             return Response({
                 'message': f'Queued {len(run_ids)} tests (Total Cost: {total_cost})',
