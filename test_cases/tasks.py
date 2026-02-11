@@ -268,60 +268,67 @@ def send_batch_report_task(batch_id, user_id):
 @shared_task(name="check_periodic_schedules")
 def check_periodic_schedules_task():
     """
-    Background worker that runs every minute to scan for collections
-    that are due for a 'period check' (uptime monitoring).
-    Optimized: Only runs HIGH priority or SMOKE tests to save tokens and avoid spam.
+    Background worker that runs scanned for scheduled collections.
+    Uses a cache lock to prevent overlapping runs.
     """
+    from django.core.cache import cache
     from collection.models import Collection
     from billing.services import deduct_tokens, calculate_test_cost
     from django.db.models import Q
     import uuid
 
-    now = timezone.now()
-    scheduled_collections = Collection.objects.filter(is_scheduled=True)
+    # Distributed lock to prevent Task Overlap (snowball effect)
+    lock_id = "qai_periodic_check_lock"
+    # Acquire lock for 10 minutes max
+    if not cache.add(lock_id, "true", 600):
+        logger.info("[PeriodicCheck] Another instance is already running. Skipping.")
+        return
 
-    for collection in scheduled_collections:
-        is_due = False
-        if not collection.last_scheduled_run_at:
-            is_due = True
-        else:
-            diff = now - collection.last_scheduled_run_at
-            if diff.total_seconds() / 60 >= collection.schedule_interval - 0.1:
+    try:
+        now = timezone.now()
+        scheduled_collections = Collection.objects.filter(is_scheduled=True)
+
+        for collection in scheduled_collections:
+            is_due = False
+            if not collection.last_scheduled_run_at:
                 is_due = True
+            else:
+                diff = now - collection.last_scheduled_run_at
+                if diff.total_seconds() / 60 >= collection.schedule_interval - 0.1:
+                    is_due = True
 
-        if is_due:
-            logger.info(f"Triggering scheduled period check for: {collection.name}")
-            batch_id = uuid.uuid4()
-            endpoints = collection.endpoints.all()
-            user = collection.project.user
-            
-            run_count = 0
-            for endpoint in endpoints:
-                # OPTIMIZATION: Only run high-priority tests for scheduled checks
-                # Or the first one if none are high priority
-                test_cases = endpoint.test_cases.filter(Q(priority='high') | Q(priority='critical') | Q(category='smoke'))
-                if not test_cases.exists():
-                    test_cases = endpoint.test_cases.all()[:1] # Fallback to first test
+            if is_due:
+                # IMPORTANT: Update timestamp IMMEDIATELY to prevent overlap
+                collection.last_scheduled_run_at = now
+                collection.save(update_fields=['last_scheduled_run_at'])
+                
+                logger.info(f"Triggering scheduled period check for: {collection.name}")
+                batch_id = uuid.uuid4()
+                endpoints = collection.endpoints.all()
+                user = collection.project.user
+                
+                run_count = 0
+                for endpoint in endpoints:
+                    # Only run high-priority/smoke tests for scheduled checks
+                    test_cases = endpoint.test_cases.filter(
+                        Q(priority='high') | Q(priority='critical') | Q(category='smoke')
+                    )
+                    if not test_cases.exists():
+                        test_cases = endpoint.test_cases.all()[:1]
 
-                for test_case in test_cases:
-                    cost = calculate_test_cost(test_case.runner_type)
-                    if deduct_tokens(user, cost, f"Scheduled Check: {test_case.name}"):
-                        run_test_case_task.delay(
-                            test_case.id,
-                            batch_id=batch_id,
-                            triggered_by="scheduled",
-                            send_notification=False # We will send a batch report instead
-                        )
-                        run_count += 1
-            
-            # If any tests were triggered, schedule a batch report
-            if run_count > 0:
-                 send_batch_report_task.apply_async((str(batch_id), user.id), countdown=60) # Send report in 60s
-            
-            collection.last_scheduled_run_at = now
-            collection.save(update_fields=['last_scheduled_run_at'])
-
-# LEGACY SHIM
-@shared_task(name="test_cases.tasks.check_periodic_schedules_task")
-def legacy_check_periodic_schedules_task():
-    return check_periodic_schedules_task()
+                    for test_case in test_cases:
+                        cost = calculate_test_cost(test_case.runner_type)
+                        if deduct_tokens(user, cost, f"Scheduled Check: {test_case.name}"):
+                            run_test_case_task.delay(
+                                test_case.id,
+                                batch_id=batch_id,
+                                triggered_by="scheduled",
+                                send_notification=False 
+                            )
+                            run_count += 1
+                
+                if run_count > 0:
+                     send_batch_report_task.apply_async((str(batch_id), user.id), countdown=60)
+    
+    finally:
+        cache.delete(lock_id)
