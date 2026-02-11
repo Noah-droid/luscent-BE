@@ -116,44 +116,45 @@ class RunnerService:
         params = {**endpoint.query_params, **test_case.query_params}
         body = test_case.body if test_case.body else endpoint.request_body
         
-        # Generate the execution script
-        # JSON serialization 
-        # Generate the execution script
-        # Manually aligned to column 0 to avoid IndentationError
-        sandbox_script = f"""import requests
-import json
-import time
-
-try:
-    start_time = time.time()
-    resp = requests.request(
-        method="{endpoint.method.upper()}",
-        url="{full_url}",
-        headers={json.dumps(headers)},
-        params={json.dumps(params)},
-        json={json.dumps(body)},
-        timeout=30,
-        allow_redirects=True,
-    )
-    duration = int((time.time() - start_time) * 1000)
-    
-    # Check size limit in container too (defense in depth)
-    MAX_SIZE = 10 * 1024 * 1024
-    content = resp.content
-    if len(content) > MAX_SIZE:
-        print(json.dumps({{"error": "Response exceeded 10MB limit"}}))
-        exit(0)
-
-    # Output structured results
-    print(json.dumps({{
-        "status": resp.status_code,
-        "headers": dict(resp.headers),
-        "body": resp.text if len(content) < 1000000 else "Body too large to display",
-        "duration": duration
-    }}))
-except Exception as e:
-    print(json.dumps({{"error": str(e)}}))
-""".strip()
+        #  Generate the execution script
+        # We use a list and join it to be 100% certain there are NO indentation issues.
+        script_lines = [
+            "import requests",
+            "import json",
+            "import time",
+            "",
+            "try:",
+            "    start_time = time.time()",
+            f"    resp = requests.request(",
+            f"        method='{endpoint.method.upper()}',",
+            f"        url='{full_url}',",
+            f"        headers={json.dumps(headers)},",
+            f"        params={json.dumps(params)},",
+            f"        json={json.dumps(body)},",
+            "        timeout=30,",
+            "        allow_redirects=True,",
+            "    )",
+            "    duration = int((time.time() - start_time) * 1000)",
+            "    ",
+            "    # Check size limit in container",
+            "    MAX_SIZE = 10 * 1024 * 1024",
+            "    content = resp.content",
+            "    if len(content) > MAX_SIZE:",
+            "        print(json.dumps({'error': 'Response exceeded 10MB limit'}))",
+            "        exit(0)",
+            "",
+            "    # Output structured results",
+            "    print(json.dumps({",
+            "        'status': resp.status_code,",
+            "        'headers': dict(resp.headers),",
+            "        'body': resp.text if len(content) < 1000000 else 'Body too large to display',",
+            "        'duration': duration",
+            "    }))",
+            "except Exception as e:",
+            "    print(json.dumps({'error': str(e)}))"
+        ]
+        
+        sandbox_script = "\n".join(script_lines)
 
         # Run in Sandbox
         result = self._run_in_sandbox(sandbox_script, timeout=40)
