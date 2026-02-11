@@ -118,41 +118,42 @@ class RunnerService:
         
         # Generate the execution script
         # JSON serialization 
-        sandbox_script = textwrap.dedent(f"""
-            import requests
-            import json
-            import time
+        # Generate the execution script
+        # Manually aligned to column 0 to avoid IndentationError
+        sandbox_script = f"""import requests
+import json
+import time
 
-            try:
-                start_time = time.time()
-                resp = requests.request(
-                    method="{endpoint.method.upper()}",
-                    url="{full_url}",
-                    headers={json.dumps(headers)},
-                    params={json.dumps(params)},
-                    json={json.dumps(body)},
-                    timeout=30,
-                    allow_redirects=True,
-                )
-                duration = int((time.time() - start_time) * 1000)
-                
-                # Check size limit in container too (defense in depth)
-                MAX_SIZE = 10 * 1024 * 1024
-                content = resp.content
-                if len(content) > MAX_SIZE:
-                    print(json.dumps({{"error": "Response exceeded 10MB limit"}}))
-                    exit(0)
+try:
+    start_time = time.time()
+    resp = requests.request(
+        method="{endpoint.method.upper()}",
+        url="{full_url}",
+        headers={json.dumps(headers)},
+        params={json.dumps(params)},
+        json={json.dumps(body)},
+        timeout=30,
+        allow_redirects=True,
+    )
+    duration = int((time.time() - start_time) * 1000)
+    
+    # Check size limit in container too (defense in depth)
+    MAX_SIZE = 10 * 1024 * 1024
+    content = resp.content
+    if len(content) > MAX_SIZE:
+        print(json.dumps({{"error": "Response exceeded 10MB limit"}}))
+        exit(0)
 
-                # Output structured results
-                print(json.dumps({{
-                    "status": resp.status_code,
-                    "headers": dict(resp.headers),
-                    "body": resp.text if len(content) < 1000000 else "Body too large to display",
-                    "duration": duration
-                }}))
-            except Exception as e:
-                print(json.dumps({{"error": str(e)}}))
-        """).strip()
+    # Output structured results
+    print(json.dumps({{
+        "status": resp.status_code,
+        "headers": dict(resp.headers),
+        "body": resp.text if len(content) < 1000000 else "Body too large to display",
+        "duration": duration
+    }}))
+except Exception as e:
+    print(json.dumps({{"error": str(e)}}))
+""".strip()
 
         # Run in Sandbox
         result = self._run_in_sandbox(sandbox_script, timeout=40)
@@ -512,34 +513,33 @@ class RunnerService:
         # We pass endpoint_data via CLI as the locustfile expects
         endpoint_data_json = json.dumps(endpoint_data)
         
-        wrapper_script = textwrap.dedent(f"""
-            import subprocess
-            import sys
-            import os
-            import json
+        wrapper_script = f"""import subprocess
+import sys
+import os
+import json
 
-            # Write the template to the sandbox
-            script_content = {repr(locust_script_template)}
-            with open("locustfile.py", "w") as f:
-                f.write(script_content)
+# Write the template to the sandbox
+script_content = {repr(locust_script_template)}
+with open("locustfile.py", "w") as f:
+    f.write(script_content)
 
-            endpoint_data_str = {repr(endpoint_data_json)}
+endpoint_data_str = {repr(endpoint_data_json)}
 
-            # Run locust with the custom argument defined in locustfile.py
-            res = subprocess.run([
-                "locust", 
-                "-f", "locustfile.py", 
-                "--headless", 
-                "-u", "5", 
-                "-r", "1", 
-                "-t", "10s",
-                "--endpoint-data", endpoint_data_str
-            ], capture_output=True, text=True)
+# Run locust with the custom argument defined in locustfile.py
+res = subprocess.run([
+    "locust", 
+    "-f", "locustfile.py", 
+    "--headless", 
+    "-u", "5", 
+    "-r", "1", 
+    "-t", "10s",
+    "--endpoint-data", endpoint_data_str
+], capture_output=True, text=True)
 
-            print(res.stdout)
-            print(res.stderr, file=sys.stderr)
-            sys.exit(res.returncode)
-        """).strip()
+print(res.stdout)
+print(res.stderr, file=sys.stderr)
+sys.exit(res.returncode)
+""".strip()
 
         result = self._run_in_sandbox(wrapper_script, timeout=30)
         
