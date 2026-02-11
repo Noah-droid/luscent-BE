@@ -106,8 +106,9 @@ class AITestGenerator:
         if hasattr(item.collection.project, 'environment_variables') and item.collection.project.environment_variables:
              project_vars = item.collection.project.environment_variables
 
-        # **NEW: Gather Collection Context for Smarter AI**
+        # **NEW: Gather Collection Context (The Map)**
         collection_context = self._gather_collection_context(item.collection)
+        other_endpoints = collection_context.get('endpoints_map', [])
 
         # Format requested scenarios for the prompt
         scenario_instruction = ""
@@ -144,6 +145,21 @@ class AITestGenerator:
             """
         else:
             scenario_instruction = "Generate 3 diverse test cases covering happy paths and common error validation."
+
+        # **NEW: Variable Flow Instruction**
+        variable_instruction = """
+        CRITICAL: HANDLING IDs AND DYNAMIC DATA (Postman-style Variables):
+        - DO NOT use literal placeholders like '{id}' or '{project_id}' in URLs or bodies.
+        - Use the variable syntax '{{variable_name}}' instead.
+        - If the endpoint requires an ID from a previous step (e.g., Get Project needs a project_id):
+          1. Use '{{project_id}}' in the URL.
+          2. Check the "Collection Map" below to see if there is a 'create' or 'list' endpoint that provides this data.
+        
+        DATA EXTRACTION:
+        - To share data between tests, add an assertion with type "extract".
+        - Example: {"type": "extract", "field": "$.id", "variable": "project_id"} will capture the 'id' from the response and store it for other tests in the batch.
+        - Always add an "extract" assertion to tests that 'Create' or 'List' entities if other tests might need their IDs.
+        """
 
         runner_instruction = f"""
         AVAILABLE RUNNERS: {json.dumps(allowed_runners)}
@@ -186,11 +202,17 @@ class AITestGenerator:
         {story_instruction}
         
         {scenario_instruction}
+
+        {variable_instruction}
         
-        Project Environment Variables (Use these values for test data where applicable):
+        Project Environment Variables:
         {json.dumps(project_vars, indent=2)}
 
-        Endpoint Details:
+        COLLECTION MAP (All endpoints in this collection):
+        Use this to understand dependencies and what data is available:
+        {json.dumps(other_endpoints, indent=2)}
+
+        ACTIVE ENDPOINT (Generate tests for THIS one):
         {json.dumps(context, indent=2)}
         """
 
@@ -421,7 +443,7 @@ class AITestGenerator:
         Gather context from previous tests in the collection for few-shot learning.
         Returns patterns, examples, and insights to make AI smarter.
         """
-        from .models import TestCase, TestRun
+        from .models import TestCase
         
         # Get recent tests in this collection (limit to 10 for performance)
         recent_tests = TestCase.objects.filter(
@@ -435,7 +457,8 @@ class AITestGenerator:
                 'common_headers': {},
                 'response_format': 'unknown',
                 'common_assertions': [],
-                'example_tests': ''
+                'example_tests': '',
+                'endpoints_map': self._get_endpoints_summary(collection)
             }
         
         # Extract patterns
@@ -485,8 +508,21 @@ class AITestGenerator:
             'common_headers': common_headers,
             'response_format': response_format,
             'common_assertions': common_assertions,
-            'example_tests': example_tests
+            'example_tests': example_tests,
+            'endpoints_map': self._get_endpoints_summary(collection)
         }
+
+    def _get_endpoints_summary(self, collection):
+        """Returns a simplified list of all endpoints in the collection for AI context."""
+        summary = []
+        for ep in collection.endpoints.all().only('method', 'url', 'name', 'request_body'):
+            summary.append({
+                "method": ep.method,
+                "url": ep.url,
+                "name": ep.name,
+                "example_body": ep.request_body
+            })
+        return summary
     
     def _extract_common_headers(self, all_headers):
         """Find headers that appear in multiple tests."""
