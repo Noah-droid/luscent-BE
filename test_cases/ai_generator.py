@@ -27,6 +27,11 @@ class AITestGenerator:
         if not allowed_runners:
             allowed_runners = ["http"]
 
+        # 0. Get Project Environment Variables
+        project_vars = {}
+        if hasattr(collection.project, 'environment_variables') and collection.project.environment_variables:
+             project_vars = collection.project.environment_variables
+
         # 1. Gather all endpoints in the collection
         endpoints = collection.endpoints.all()
         endpoint_map = [
@@ -60,48 +65,52 @@ class AITestGenerator:
             if not target_endpoint:
                 continue
 
-            test_data = self._generate_stateful_test(target_endpoint, step, collection, user_story, allowed_runners)
+            test_data = self._generate_stateful_test(target_endpoint, step, collection, user_story, allowed_runners, project_vars)
             if test_data:
                 orchestrated_tests.extend(test_data)
 
         return orchestrated_tests
 
-    def _plan_orchestration(self, collection, endpoint_map, user_story, scenarios):
+    def _plan_orchestration(self, collection, endpoint_map, user_story, scenarios, project_vars=None):
         """
         Analyzes the collection and returns a list of logical steps with dependencies.
         """
+        env_context = f"\nPROJECT ENVIRONMENT VARIABLES:\n{json.dumps(project_vars or {}, indent=2)}" if project_vars else ""
+        
         prompt = f"""
-You are a QA Architect. Your goal is to design a high-level INTEGRATION test plan for this API collection.
-The user wants a sequence of tests that realistically flow together (e.g., Create -> Get -> Update -> Delete).
+You are a Senior QA Architect. Your task is to design a SENTIENT execution plan for this API collection.
+Do NOT just loop through endpoints. Instead, follow the "User Lifecycle".
 
 PROJECT: {collection.project.name}
 COLLECTION: {collection.name}
-USER STORY/REQUIREMENTS: "{user_story or 'Ensure full functionality.'}"
+GOAL: {user_story or 'Establish a full working environment and test all core features.'}
+{env_context}
 
 ENDPOINTS AVAILABLE:
 {json.dumps(endpoint_map, indent=2)}
 
 TASK:
-1. Identify the logical order of operations.
-2. Group them into a cohesive "Flow".
-3. For each step, identify WHAT variable needs to be extracted (e.g., id, token) and WHAT variable is needed from a previous step.
+1. PHASE 1: DISCOVERY - Identify the "Entry Point" endpoints (Sign up, Login, Auth, or Onboarding). These must run FIRST.
+2. PHASE 2: RESOURCE CREATION - Identify which endpoints create the core resources (e.g., POST /projects, POST /users).
+3. PHASE 3: INTERACTION - Identify endpoints that use those resources (GET, PUT, PATCH).
+4. PHASE 4: CLEANUP - Identify DELETE endpoints (These must run LAST).
+
+LOGICAL FLOW RULES:
+- If an endpoint needs 'project_id', it MUST be preceded by an endpoint that provides it.
+- If the collection has Authentication, the very first step MUST be obtaining a token.
+- GROUP tests into a single logical "Success Path" story.
 
 OUTPUT FORMAT (Strict JSON List):
 [
   {{
     "endpoint_id": "UUID",
-    "name": "Logical Test Name",
-    "purpose": "Why are we running this?",
-    "scenarios": ["HAPPY_PATH", "SECURITY", "VALIDATION"],
-    "extract_vars": {{"variable_name": "$.json_path"}},
-    "depends_on_vars": ["previous_var_name"]
-  }}
+    "name": "Step 1: Authenticate",
+    "purpose": "Identify as a valid user to enable further testing.",
+    "extract_vars": {{"auth_token": "$.token"}},
+    "depends_on_vars": []
+  }},
+  ...
 ]
-
-CRITICAL RULES:
-- Focus on "Stateful Flows". Do not just list every endpoint randomly.
-- Prioritize endpoints that create resources (POST) or authentication (Login).
-- Ensure Delete operations come at the end.
 """
         try:
             response = self._call_llm(prompt)
@@ -111,15 +120,18 @@ CRITICAL RULES:
             logger.error(f"Planning failed: {e}")
             return None
 
-    def _generate_stateful_test(self, endpoint, step_plan, collection, user_story, allowed_runners):
+    def _generate_stateful_test(self, endpoint, step_plan, collection, user_story, allowed_runners, project_vars=None):
         """
         Generates the actual TestCase data for a specific step in the plan.
         """
+        env_context = f"\nPROJECT ENVIRONMENT VARIABLES (Use these where appropriate):\n{json.dumps(project_vars or {}, indent=2)}" if project_vars else ""
+
         prompt = f"""
 You are a Lead QA Engineer. Generate the detailed test configuration for a specific step in a planned flow.
 
 COLLECTION CONTEXT: {collection.name}
 GLOBAL STORY: {user_story}
+{env_context}
 
 STEP PLAN:
 {json.dumps(step_plan, indent=2)}
