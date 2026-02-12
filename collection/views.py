@@ -198,10 +198,12 @@ class SwaggerImportView(APIView):
 
             # Update Collection
             collection.source = "swagger"
-            collection.base_url = extract_base_url(spec)
+            spec_base_url = extract_base_url(spec)
+            if spec_base_url and not collection.base_url:
+                collection.base_url = spec_base_url
             collection.save()
 
-            parse_result = parse_paths_to_endpoints(spec, project_obj=collection.project)
+            parse_result = parse_paths_to_endpoints(spec, project_obj=collection.project, default_base_url=collection.base_url)
             endpoints = parse_result.get("endpoints", [])
             created_count = 0
             
