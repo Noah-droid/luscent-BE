@@ -142,10 +142,14 @@ class RunnerService:
         body = test_case.body if test_case.body else endpoint.request_body
         
         #  VARIABLE SUBSTITUTION (Stateful Flow)
-        # Look for variables in the batch context if batch_id is present
-        batch_vars = {}
+        # 1. Start with "Static Context" (Current IDs and Environment Vars)
+        batch_vars = {
+            "project_id": str(endpoint.collection.project.id),
+            "collection_id": str(endpoint.collection.id),
+            "endpoint_id": str(endpoint.id),
+        }
         
-        # 1. Start with Project Environment Variables (Baseline)
+        # Add Project Environment Variables
         if hasattr(endpoint.collection.project, 'environment_variables') and endpoint.collection.project.environment_variables:
             batch_vars.update(endpoint.collection.project.environment_variables)
 
@@ -156,14 +160,18 @@ class RunnerService:
                 if prev.extracted_data:
                     batch_vars.update(prev.extracted_data)
         
-        # Helper to replace {{var}} in strings or nested dicts
+        # Helper to replace {{var}} or {var} in strings or nested dicts
         def replace_vars(data):
             if isinstance(data, str):
                 import re
                 def sub_match(match):
                     var_name = match.group(1)
+                    # Priority: 1. Batch Context (Dynamic), 2. Project Env (Static), 3. Original String
                     return str(batch_vars.get(var_name, match.group(0)))
-                return re.sub(r"\{\{([^}]+)\}\}", sub_match, data)
+                
+                # Match {{var}} first, then fall back to {var} if it looks like a variable
+                result = re.sub(r"\{\{([^}]+)\}\}", sub_match, data)
+                return re.sub(r"(?<!\{)\{([a-zA-Z0-9_]+)\}(?!\})", sub_match, result)
             elif isinstance(data, dict):
                 return {k: replace_vars(v) for k, v in data.items()}
             elif isinstance(data, list):
@@ -174,6 +182,13 @@ class RunnerService:
         headers = replace_vars(headers)
         params = replace_vars(params)
         body = replace_vars(body)
+
+        # AUTO-AUTH INJECTION: If we have a token in memory but headers are missing auth
+        if not headers.get("Authorization") and not headers.get("X-API-Key"):
+            token = batch_vars.get("auth_token") or batch_vars.get("token") or batch_vars.get("access_token")
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+                logger.info(f"[Runner] Auto-injected token into Authorization header for {endpoint.name}")
 
         #  Generate the execution script
         # We use a list and join it to be 100% certain there are NO indentation issues.
