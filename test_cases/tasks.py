@@ -168,74 +168,85 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     # We NO LONGER iterate over runner_types directly. We pass the list to the AI
     # and let the AI decide the best runner (HTTP vs Browser) for each endpoint.
     
-    for endpoint in endpoints:
-        logger.info(f"[CollectionAutoPilot] Processing endpoint: {endpoint.name} ({endpoint.method} {endpoint.url})")
-        for category in categories:
-            logger.info(f"[CollectionAutoPilot] Generating {category} tests for endpoint: {endpoint.name}")
+    # REWRITTEN: ORCHESTRATED ENGINE
+    generator = AITestGenerator()
+    
+    # If no story provided, use collection context or project context
+    final_story = user_story or collection.user_story or collection.description or collection.project.user_story or collection.project.description or ""
+    
+    # 1. Billing check for ORCHESTRATION (Flat bulk cost for planning + generation)
+    ORCHESTRATION_PLAN_COST = 25 
+    if not deduct_tokens(user, ORCHESTRATION_PLAN_COST, f"Auto-Pilot Orchestration: {collection.name}"):
+        logger.warning(f"Insufficient tokens for Orchestration on {collection.name}")
+        return
+
+    # 2. Trigger AI Orchestration (Planning + Test Generation in one flow)
+    try:
+        draft_tests = generator.orchestrate_collection_tests(
+            collection,
+            user_story=final_story,
+            scenarios=scenarios,
+            allowed_runners=runner_types
+        )
+        logger.info(f"[CollectionAutoPilot] AI generated {len(draft_tests)} orchestrated tests.")
+    except Exception as e:
+        logger.error(f"[CollectionAutoPilot] Orchestration failed: {e}")
+        return
+
+    # 3. SEQUENTIAL EXECUTION (CRITICAL for Stateful Flow)
+    from .models import TestCase
+    from .tasks import run_test_case_task
+    import time
+    
+    for test_data in draft_tests:
+        try:
+            # Re-fetch endpoint to be safe
+            endpoint_id = test_data.get("endpoint_id") or test_data.get("endpoint") 
+            endpoint = collection.endpoints.get(id=endpoint_id) if endpoint_id else None
             
-            # 1. Billing check for AI
-            AI_COST = 5
-            context_label = f"{category.upper()}"
-            if not deduct_tokens(user, AI_COST, f"Auto-Pilot ({context_label}): {endpoint.name}"):
-                logger.warning(f"Insufficient tokens for Auto-Pilot on {endpoint.name}")
+            if not endpoint:
+                logger.warning(f"Skipping test '{test_data.get('name')}' - Endpoint not found.")
                 continue
 
-            # 2. Call AI with allowed_runners list
-            try:
-                draft_tests = generator.generate_draft_plan(
-                    endpoint,
-                    scenarios=scenarios,
-                    user_story=final_story,
-                    allowed_runners=runner_types, # Pass the list!
-                    category=category,
-                    layer=layer
-                )
-                logger.info(f"[CollectionAutoPilot] AI generated {len(draft_tests)} tests for {endpoint.name}")
-            except Exception as e:
-                logger.error(f"[CollectionAutoPilot] AI generation failed for {endpoint.name}: {e}")
-                continue
-            
-            # 3. Save Tests & Trigger Runs
-            for data in draft_tests:
-                try:
-                    # Determine chosen runner from AI response, fallback to HTTP
-                    chosen_runner = data.get("runner_type", "http").lower()
-                    
-                    test_case = TestCase.objects.create(
-                        endpoint=endpoint,
-                        name=data.get("name"),
-                        description=data.get("description"),
-                        priority=data.get("priority", "medium").lower(),
-                        category=category, 
-                        layer=data.get("layer", layer),
-                        runner_type=chosen_runner, # Use AI's choice
-                        test_script=data.get("test_script"),
-                        headers=data.get("headers", {}),
-                        query_params=data.get("query_params", {}),
-                        body=data.get("body", {}),
-                        expected_status=data.get("expected_status", 200),
-                        assertions=data.get("assertions", []),
-                        tags=data.get("tags", []),
-                        use_visual_ai=use_visual_ai, 
-                        ai_generated=True,
-                        user_story=data.get("user_story", final_story)
-                    )
-                    logger.info(f"[CollectionAutoPilot] Created test case: {test_case.name} (id={test_case.id})")
-                    
-                    # 4. Trigger Run (Immediate Queue)
-                    RUN_COST = calculate_test_cost(test_case.runner_type)
-                    if deduct_tokens(user, RUN_COST, f"Auto-Pilot Run: {test_case.name}"):
-                        logger.info(f"[CollectionAutoPilot] Queueing test run for: {test_case.name}")
-                        run_test_case_task.delay(
-                            test_case.id, 
-                            batch_id=batch_id, 
-                            triggered_by="ai",
-                            send_notification=False # Skip individual emails
-                        )
-                    else:
-                        logger.warning(f"[CollectionAutoPilot] Insufficient tokens to run test: {test_case.name}")
-                except Exception as e:
-                    logger.error(f"Collection Auto-Pilot failed to create/run test for {endpoint.name}: {e}")
+            # Create the test case record
+            test_case = TestCase.objects.create(
+                endpoint=endpoint,
+                name=test_data.get("name"),
+                description=test_data.get("description"),
+                priority=test_data.get("priority", "medium").lower(),
+                category=test_data.get("category", "functional"),
+                layer=test_data.get("layer", layer),
+                runner_type=test_data.get("runner_type", "http").lower(),
+                test_script=test_data.get("test_script"),
+                headers=test_data.get("headers", {}),
+                query_params=test_data.get("query_params", {}),
+                body=test_data.get("body", {}),
+                expected_status=test_data.get("expected_status", 200),
+                assertions=test_data.get("assertions", []),
+                ai_generated=True,
+                user_story=final_story
+            )
+
+            # Execution Billing
+            RUN_COST = calculate_test_cost(test_case.runner_type)
+            if deduct_tokens(user, RUN_COST, f"Stateful Run: {test_case.name}"):
+                logger.info(f"[CollectionAutoPilot] Executing sequence step: {test_case.name}")
+                
+                # RUN SYNCHRONOUSLY (By calling the service directly or using .run())
+                # To ensure state is passed, we run them one by one in THIS thread
+                # or we could chain them, but a loop here is easiest to manage.
+                from .runner_service import RunnerService
+                runner = RunnerService()
+                runner.execute_test(test_case, batch_id=batch_id, triggered_by="ai")
+                
+                # Tiny cooldown to allow DB/Runner state to settle
+                time.sleep(2)
+            else:
+                logger.warning(f"Task skipped due to tokens: {test_case.name}")
+
+        except Exception as ex:
+            logger.error(f"Failed to execute orchestrated step: {ex}")
+            continue
     
     # Schedule batch report
     send_batch_report_task.apply_async((str(batch_id), user.id), countdown=180) # 3m delay
