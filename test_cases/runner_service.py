@@ -89,12 +89,37 @@ class RunnerService:
         endpoint = test_case.endpoint
         
         # URL Resolution
-        if override_url:
-            from urllib.parse import urlparse
-            orig_parsed = urlparse(endpoint.url)
-            full_url = endpoint.url.replace(f"{orig_parsed.scheme}://{orig_parsed.netloc}", override_url.rstrip('/'))
-        else:
-            full_url = endpoint.url
+        collection = endpoint.collection
+        full_url = endpoint.url
+        
+        # Effective base comes from override (Webhook/CI) or Collection settings
+        effective_base = override_url or collection.base_url
+        
+        if effective_base:
+            from urllib.parse import urlparse, urljoin
+            
+            # If the stored URL is just a path, join it
+            if not full_url.startswith('http'):
+                if not effective_base.endswith('/'):
+                    effective_base += '/'
+                full_url = urljoin(effective_base, full_url.lstrip('/'))
+            else:
+                # If absolute, check if we should override the origin/prefix
+                p_url = urlparse(full_url)
+                p_base = urlparse(effective_base)
+                
+                # If we are overriding (override_url) OR if the domain matches (fixing prefix /api/)
+                if override_url or p_url.netloc == p_base.netloc:
+                    if not effective_base.endswith('/'):
+                        effective_base += '/'
+                    # Re-join: effective_base + endpoint_path + query
+                    path_part = p_url.path.lstrip('/')
+                    query_part = f"?{p_url.query}" if p_url.query else ""
+                    full_url = urljoin(effective_base, path_part + query_part)
+        
+        # Clean up double slashes (except in protocol)
+        import re
+        full_url = re.sub(r'(?<!:)/{2,}', '/', full_url)
 
         # SECURITY: Validate URL on host before sending to sandbox
         try:
