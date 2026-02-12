@@ -98,10 +98,15 @@ def parse_paths_to_endpoints(spec: dict, project_obj=None, default_base_url=None
                     results["skipped"] += 1
                     continue
 
+                # Ensure base_url has trailing slash for urljoin to work correctly with paths
+                effective_base = base_url or ""
+                if effective_base and not effective_base.endswith("/"):
+                    effective_base += "/"
+
                 endpoint = {
                     "method": m,
                     "path": raw_path,
-                    "full_url": urljoin(base_url or "", raw_path.lstrip("/")),
+                    "full_url": urljoin(effective_base, raw_path.lstrip("/")),
                     "name": op_obj.get("summary") or op_obj.get("operationId") or f"{m} {raw_path}",
                     "description": op_obj.get("description", ""),
                     "parameters": op_obj.get("parameters", []),
