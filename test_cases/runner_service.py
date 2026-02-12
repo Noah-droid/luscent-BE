@@ -144,6 +144,12 @@ class RunnerService:
         #  VARIABLE SUBSTITUTION (Stateful Flow)
         # Look for variables in the batch context if batch_id is present
         batch_vars = {}
+        
+        # 1. Start with Project Environment Variables (Baseline)
+        if hasattr(endpoint.collection.project, 'environment_variables') and endpoint.collection.project.environment_variables:
+            batch_vars.update(endpoint.collection.project.environment_variables)
+
+        # 2. Layer in variables extracted from previous runs in this batch
         if test_run.batch_id:
             previous_runs = TestRun.objects.filter(batch_id=test_run.batch_id).exclude(id=test_run.id)
             for prev in previous_runs:
