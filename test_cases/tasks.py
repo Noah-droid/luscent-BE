@@ -168,85 +168,67 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     # We NO LONGER iterate over runner_types directly. We pass the list to the AI
     # and let the AI decide the best runner (HTTP vs Browser) for each endpoint.
     
-    # REWRITTEN: ORCHESTRATED ENGINE
-    generator = AITestGenerator()
+    # REWRITTEN: AUTONOMOUS AGENT ENGINE (Vibe Coding)
+    from .autonomous_agent import AutonomousAgent
+    from .models import TestCase, TestRun
+    import json
     
     # If no story provided, use collection context or project context
     final_story = user_story or collection.user_story or collection.description or collection.project.user_story or collection.project.description or ""
     
-    # 1. Billing check for ORCHESTRATION (Flat bulk cost for planning + generation)
-    ORCHESTRATION_PLAN_COST = 25 
-    if not deduct_tokens(user, ORCHESTRATION_PLAN_COST, f"Auto-Pilot Orchestration: {collection.name}"):
-        logger.warning(f"Insufficient tokens for Orchestration on {collection.name}")
+    # 1. Billing check for AGENT SESSION (Premium Feature)
+    AGENT_SESSION_COST = 50 
+    if not deduct_tokens(user, AGENT_SESSION_COST, f"Autonomous Agent Mission: {collection.name}"):
+        logger.warning(f"Insufficient tokens for Agent Mission on {collection.name}")
         return
 
-    # 2. Trigger AI Orchestration (Planning + Test Generation in one flow)
-    try:
-        draft_tests = generator.orchestrate_collection_tests(
-            collection,
-            user_story=final_story,
-            scenarios=scenarios,
-            allowed_runners=runner_types
-        )
-        logger.info(f"[CollectionAutoPilot] AI generated {len(draft_tests)} orchestrated tests.")
-    except Exception as e:
-        logger.error(f"[CollectionAutoPilot] Orchestration failed: {e}")
-        return
-
-    # 3. SEQUENTIAL EXECUTION (CRITICAL for Stateful Flow)
-    from .models import TestCase
-    from .tasks import run_test_case_task
-    import time
+    # 2. Initialize Agent
+    project_vars = {}
+    if hasattr(collection.project, 'environment_variables') and collection.project.environment_variables:
+        project_vars = collection.project.environment_variables
+        
+    agent = AutonomousAgent(collection, user_story=final_story, env_vars=project_vars)
     
-    for test_data in draft_tests:
-        try:
-            # Re-fetch endpoint to be safe
-            endpoint_id = test_data.get("endpoint_id") or test_data.get("endpoint") 
-            endpoint = collection.endpoints.get(id=endpoint_id) if endpoint_id else None
-            
-            if not endpoint:
-                logger.warning(f"Skipping test '{test_data.get('name')}' - Endpoint not found.")
-                continue
-
-            # Create the test case record
-            test_case = TestCase.objects.create(
-                endpoint=endpoint,
-                name=test_data.get("name"),
-                description=test_data.get("description"),
-                priority=test_data.get("priority", "medium").lower(),
-                category=test_data.get("category", "functional"),
-                layer=test_data.get("layer", layer),
-                runner_type=test_data.get("runner_type", "http").lower(),
-                test_script=test_data.get("test_script"),
-                headers=test_data.get("headers", {}),
-                query_params=test_data.get("query_params", {}),
-                body=test_data.get("body", {}),
-                expected_status=test_data.get("expected_status", 200),
-                assertions=test_data.get("assertions", []),
-                ai_generated=True,
-                user_story=final_story
-            )
-
-            # Execution Billing
-            RUN_COST = calculate_test_cost(test_case.runner_type)
-            if deduct_tokens(user, RUN_COST, f"Stateful Run: {test_case.name}"):
-                logger.info(f"[CollectionAutoPilot] Executing sequence step: {test_case.name}")
+    # 3. Run The Mission (Blocking Call - The Agent thinks and acts)
+    try:
+        steps_log = agent.run_mission(max_steps=15)
+        logger.info(f"[CollectionAutoPilot] Agent completed {len(steps_log)} steps.")
+        
+        # 4. Convert Agent Logs to Test Runs (For Dashboard Visibility)
+        for step in steps_log:
+            if step['action'] == 'CALL_API':
+                # Find endpoint
+                endpoint = collection.endpoints.filter(method=step['method'], url=step['url']).first()
+                if not endpoint:
+                    # Fallback lookup by name or path match if URL resolved dynamically
+                    endpoint = collection.endpoints.filter(url__icontains=step['url']).first()
                 
-                # RUN SYNCHRONOUSLY (By calling the service directly or using .run())
-                # To ensure state is passed, we run them one by one in THIS thread
-                # or we could chain them, but a loop here is easiest to manage.
-                from .runner_service import RunnerService
-                runner = RunnerService()
-                runner.execute_test(test_case, batch_id=batch_id, triggered_by="ai")
+                # Create a "Record" of what the agent did
+                test_case = TestCase.objects.create(
+                    endpoint=endpoint, # Can be null if agent invented a path
+                    name=f"Agent Step {step['step']}: {step['endpoint']}",
+                    description=f"Auto-executed by agent. Status: {step['status']}",
+                    runner_type="http",
+                    category="functional", 
+                    ai_generated=True,
+                    user_story=final_story,
+                    assertions=[{"type": "status", "value": step['response']['status']}] # Implicit assertion
+                )
                 
-                # Tiny cooldown to allow DB/Runner state to settle
-                time.sleep(2)
-            else:
-                logger.warning(f"Task skipped due to tokens: {test_case.name}")
-
-        except Exception as ex:
-            logger.error(f"Failed to execute orchestrated step: {ex}")
-            continue
+                # Save the Run Result
+                TestRun.objects.create(
+                    test_case=test_case,
+                    batch_id=batch_id,
+                    status="passed" if step['status'] == "passed" else "failed",
+                    response_status=step['response']['status'],
+                    response_body=step['response']['body'],
+                    response_time_ms=step['response']['duration_ms'],
+                    logs=f"REQUEST:\n{json.dumps(step['request'], indent=2)}\n\nRESPONSE:\n{step['response']['body']}",
+                    triggered_by="ai_agent"
+                )
+    except Exception as e:
+        logger.error(f"[CollectionAutoPilot] Agent Mission Failed: {e}")
+        return
     
     # Schedule batch report
     send_batch_report_task.apply_async((str(batch_id), user.id), countdown=180) # 3m delay
