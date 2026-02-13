@@ -230,12 +230,12 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_IMPORTS = ('test_cases.tasks', 'collection.tasks')
 
-CELERY_BEAT_SCHEDULE = {
-    'check-periodic-test-schedules': {
-        'task': 'check_periodic_schedules',
-        'schedule': 120.0, # Run every 2 minutes
-    },
-}
+# CELERY_BEAT_SCHEDULE = {
+#     'check-periodic-test-schedules': {
+#         'task': 'check_periodic_schedules',
+#         'schedule': 120.0, # Run every 2 minutes
+#     },
+# }
 
 # Cloudinary Configuration
 CLOUDINARY_CLOUD_NAME = config('CLOUDINARY_CLOUD_NAME', default='')
