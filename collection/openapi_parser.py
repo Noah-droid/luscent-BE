@@ -19,12 +19,18 @@ def load_spec_from_text(text):
     Returns dict or raises ValueError.
     """
     try:
-        return json.loads(text)
+        res = json.loads(text)
+        if not isinstance(res, dict):
+             raise ValueError("Parsed JSON is not a dictionary.")
+        return res
     except Exception:
         try:
-            return yaml.safe_load(text)
+            res = yaml.safe_load(text)
+            if not isinstance(res, dict):
+                 raise ValueError("Parsed YAML is not a dictionary (likely HTML or plain text).")
+            return res
         except Exception as e:
-            raise ValueError("Failed to parse spec as JSON or YAML.") from e
+            raise ValueError("Failed to parse spec as JSON or YAML. Ensure you are providing the raw JSON/YAML endpoint, not the Swagger UI HTML page.") from e
 
 
 def fetch_spec_from_url(url, timeout=10):
