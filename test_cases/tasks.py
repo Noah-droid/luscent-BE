@@ -295,33 +295,17 @@ def check_periodic_schedules_task():
                 collection.last_scheduled_run_at = now
                 collection.save(update_fields=['last_scheduled_run_at'])
                 
-                logger.info(f"Triggering scheduled period check for: {collection.name}")
-                batch_id = uuid.uuid4()
-                endpoints = collection.endpoints.all()
-                user = collection.project.user
-                
-                run_count = 0
-                for endpoint in endpoints:
-                    # Only run high-priority/smoke tests for scheduled checks
-                    test_cases = endpoint.test_cases.filter(
-                        Q(priority='high') | Q(priority='critical') | Q(category='smoke')
-                    )
-                    if not test_cases.exists():
-                        test_cases = endpoint.test_cases.all()[:1]
-
-                    for test_case in test_cases:
-                        cost = calculate_test_cost(test_case.runner_type)
-                        if deduct_tokens(user, cost, f"Scheduled Check: {test_case.name}"):
-                            run_test_case_task.delay(
-                                test_case.id,
-                                batch_id=batch_id,
-                                triggered_by="scheduled",
-                                send_notification=False 
-                            )
-                            run_count += 1
-                
-                if run_count > 0:
-                     send_batch_report_task.apply_async((str(batch_id), user.id), countdown=60)
+                # Use the new Autonomous Agent for the scheduled run
+                # This prevents 'bombarding' Redis with many individual tasks
+                from .tasks import collection_auto_pilot_task
+                collection_auto_pilot_task.delay(
+                    collection_id=collection.id,
+                    user_id=collection.project.user_id,
+                    scenarios="scheduled_smoke_test",
+                    batch_id=str(batch_id),
+                    user_story="Perform a scheduled smoke test to ensure API stability."
+                )
+                logger.info(f"Scheduled Agent Mission queued for: {collection.name}")
     
     finally:
         cache.delete(lock_id)
