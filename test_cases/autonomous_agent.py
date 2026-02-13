@@ -265,15 +265,22 @@ Type D: FINISH
 """
 
     def _get_next_action(self):
-        """Calls LLM to decide the next move based on history."""
+        """Calls LLM to decide the next move based on context."""
         try:
+            # Refresh the context: Let the agent know what it currently 'knows'
+            memory_context = {
+                "role": "system", 
+                "content": f"CURRENT MEMORY (Variables available): {json.dumps(self.extracted_vars)}"
+            }
+            
+            # We don't want to bloat the history, so we just temporarily insert/update the memory
+            messages = [self.history[0]] + [memory_context] + self.history[1:]
+
             if self.provider == "gemini":
-                # NATIVE GEMINI JSON MODE
+                # ... (Gemini Logic) ...
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.gemini_api_key}"
-                
-                # Convert history to Gemini format (user/model instead of user/assistant)
                 contents = []
-                for msg in self.history:
+                for msg in messages:
                     role = "user" if msg["role"] in ["user", "system"] else "model"
                     contents.append({"role": role, "parts": [{"text": msg["content"]}]})
                 
@@ -288,11 +295,11 @@ Type D: FINISH
                 resp.raise_for_status()
                 content = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
             else:
-                # OPENAI FLOW
+                # ... (OpenAI Logic) ...
                 url = "https://api.openai.com/v1/chat/completions"
                 payload = {
                     "model": self.model,
-                    "messages": self.history,
+                    "messages": messages,
                     "temperature": 0.2,
                     "response_format": {"type": "json_object"}
                 }
