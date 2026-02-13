@@ -14,8 +14,12 @@ class AITestGenerator:
         self.openai_base_url = getattr(settings, 'LLM_BASE_URL', "https://api.openai.com/v1")
         self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)
         
-        # Using stable high-performing models
-        self.model = "gpt-4o-mini" if self.provider == "openai" else "gemini-1.5-flash"
+        # Using latest 2026 state-of-the-art models
+        if self.provider == "gemini":
+            self.model = getattr(settings, 'GEMINI_MODEL', 'gemini-3-flash')
+        else:
+            self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
+            
         self.max_tokens = 8192 
         self.temperature = 0.5 # Lower temperature for better structural planning
 
