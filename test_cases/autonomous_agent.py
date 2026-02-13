@@ -17,15 +17,20 @@ class AutonomousAgent:
         self.env_vars = env_vars or {}
         
         # LLM Config
-        self.provider = getattr(settings, 'LLM_PROVIDER', 'openai').lower()
-        self.api_key = getattr(settings, 'LLM_API_KEY', None)
-        self.base_url = getattr(settings, 'LLM_BASE_URL', "https://api.openai.com/v1")
-        self.model = "gpt-4o-mini" # Fast, smart model for agent loops
+        self.provider = getattr(settings, 'LLM_PROVIDER', 'gemini').lower() # Default to Gemini
+        self.openai_api_key = getattr(settings, 'LLM_API_KEY', None)
+        self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)
+        
+        # Intelligent Model Selection (2026 Fleet)
+        if self.provider == "gemini":
+            self.model = getattr(settings, 'GEMINI_MODEL', 'gemini-3-flash')
+        else:
+            self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
 
         # Agent Memory (The "Brain")
-        self.session = requests.Session() # Persist cookies/connection
-        self.history = [] # Formatting: [{"role": "user", "content": ...}, ...]
-        self.extracted_vars = {} # Dynamic variables (tokens, IDs)
+        self.session = requests.Session() 
+        self.history = [] 
+        self.extracted_vars = {} 
         
         # Hydrate memory with Env Vars
         if self.env_vars:
@@ -54,16 +59,32 @@ class AutonomousAgent:
             # DECIDE ACTION
             action = self._get_next_action()
             
-            if action.get("type") == "FINISH":
-                logger.info(f"[Agent] Mission Complete: {action.get('reason')}")
+            if action.get("type") == "BROWSER_ACTION":
+                # EXECUTE BROWSER STEP
+                result = self._execute_browser_action(action)
                 steps_log.append({
                     "step": step_i,
-                    "action": "FINISH",
-                    "reason": action.get("reason"),
-                    "status": "success"
+                    "action": "BROWSER_ACTION",
+                    "details": action,
+                    "response": result,
+                    "status": "passed" if not result.get("error") else "failed"
                 })
-                break
-                
+                self._record_observation(f"Browser Result: {json.dumps(result)}")
+                continue
+
+            if action.get("type") == "STRESS_TEST":
+                # EXECUTE LOAD TEST
+                result = self._execute_stress_test(action, endpoint_map)
+                steps_log.append({
+                    "step": step_i,
+                    "action": "STRESS_TEST",
+                    "details": action,
+                    "response": result,
+                    "status": "passed" if not result.get("error") else "failed"
+                })
+                self._record_observation(f"Stress Test Result: {json.dumps(result)}")
+                continue
+
             if action.get("type") == "CALL_API":
                 # EXECUTE API CALL
                 endpoint_id = action.get("endpoint_id")
@@ -103,7 +124,7 @@ class AutonomousAgent:
                     steps_log.append({
                         "step": step_i,
                         "action": "CALL_API",
-                        "endpoint": target['name'],
+                        "endpoint": target.get('name', 'Unnamed'),
                         "method": target['method'],
                         "url": target['url'],
                         "request": req_data,
@@ -114,9 +135,6 @@ class AutonomousAgent:
                     # Feed Observation back to Agent
                     observation = f"API Response: {response.status_code} {response.reason}\nBody: {result_summary['body']}"
                     self._record_observation(observation)
-                    
-                    # Auto-Extract known variables (Naive approach, Agent does sophisticated extraction via thought)
-                    # We rely on the Agent to "Observing" use useful values in the next turn
                     
                 except Exception as e:
                     logger.error(f"[Agent] Step failed: {e}")
@@ -130,62 +148,161 @@ class AutonomousAgent:
 
         return steps_log
 
+    def _execute_browser_action(self, action):
+        """Simulates a browser interaction using Playwright."""
+        from playwright.sync_api import sync_playwright
+        logger.info(f"[Agent] Browser Action: {action.get('action')} on {action.get('url') or action.get('selector')}")
+        
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                # Use a context to persist state if needed, but for now we do atomic steps
+                page = browser.new_page()
+                
+                if action.get("action") == "navigate":
+                    page.goto(action.get("url"))
+                elif action.get("click"):
+                    page.click(action.get("selector"))
+                elif action.get("type"):
+                    page.fill(action.get("selector"), action.get("value"))
+                
+                # Capture a summary of the page state
+                content = page.content()[:1000]
+                title = page.title()
+                browser.close()
+                return {"status": "success", "title": title, "page_preview": content}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def _execute_stress_test(self, action, endpoint_map):
+        """Executes a simple high-concurrency stress test."""
+        import concurrent.futures
+        
+        target_ids = action.get("endpoints_to_hit", [])
+        users = action.get("users", 10)
+        
+        logger.info(f"[Agent] Stress Test: Hitting {len(target_ids)} endpoints with {users} users.")
+        
+        def hit_endpoint(endpoint_id):
+            target = endpoint_map.get(str(endpoint_id))
+            if not target: return None
+            try:
+                resp = requests.request(target['method'], self._resolve_url(target['url']), timeout=10)
+                return resp.status_code
+            except:
+                return 500
+
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            # Simple spread: each user hits all target endpoints once
+            futures = [executor.submit(hit_endpoint, eid) for _ in range(users) for eid in target_ids]
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+        
+        success_count = len([r for r in results if r and r < 400])
+        return {
+            "total_requests": len(results),
+            "success_rate": f"{(success_count/len(results))*100}%" if results else "0%",
+            "status": "success"
+        }
+
+        return steps_log
+
     def _build_system_prompt(self, endpoints):
         return f"""
-You are an Autonomous QA Agent. Your goal is to verify the User Story on a live API.
+You are an Universal Autonomous QA Agent. You have the "Vibe" of a senior human tester.
+Your goal is to verify the User Story: "{self.user_story}"
 
-USER STORY: "{self.user_story}"
 PROJECT VARS: {json.dumps(self.env_vars)}
 
-AVAILABLE ENDPOINTS (Map):
+AVAILABLE API ENDPOINTS:
 {json.dumps(endpoints, indent=2)}
 
+YOUR TOOLSET:
+1. CALL_API: Use this for functional backend testing and state preparation.
+2. BROWSER_ACTION: Use this to test the UI/UX. You can navigate, click, and type via Playwright.
+3. STRESS_TEST: Use this if the user wants to test performance or high load. You will define the scenario.
+
 INSTRUCTIONS:
-1. Analyze the endpoints and decide the best next step to fulfill the story.
-2. Maintain internal state (IDs, Tokens). If you create a resource, remember its ID.
-3. If an API fails (400/401/404), ANALYZE WHY and correct yourself in the next step (e.g. "I forgot auth", "I need to create a user first").
-4. Repeat until the story is fully verified or you are stuck.
+1. UNDERSTUDY: Look at the whole collection map before your first move.
+2. STRATEGIZE: If the story is about "User Experience", start with BROWSER_ACTION. If it's "API Reliability", use CALL_API.
+3. ADAPT: If an API call fails, don't just die. Think: "Did I miss a header? Do I need to login first?" and fix it.
+4. MISSION COMPLETE: Only finish when the story is truly verified across both API and (if needed) UI.
 
 OUTPUT FORMAT (JSON ONLY):
-Return a JSON object with ONE of these types:
+Return a JSON object:
 
 Type A: CALL_API
 {{
   "type": "CALL_API",
   "endpoint_id": "...",
-  "reason": "I need to login to get a token.",
-  "payload": {{
-    "headers": {{ "Authorization": "Bearer ..." }},
-    "body": {{ ... }},
-    "params": {{ ... }}
-  }}
+  "reason": "Explain why this step matters for the story",
+  "payload": {{ "headers": {{...}}, "body": {{...}}, "params": {{...}} }}
 }}
 
-Type B: FINISH
+Type B: BROWSER_ACTION
 {{
-  "type": "FINISH",
-  "reason": "I have successfully created and deleted the project. The story is verified."
+  "type": "BROWSER_ACTION",
+  "action": "navigate/click/type/check",
+  "url": "...",
+  "selector": "css selector if clicking/typing",
+  "value": "text to type if action is 'type'",
+  "reason": "I need to see if the dashboard loads after login"
 }}
+
+Type C: STRESS_TEST
+{{
+  "type": "STRESS_TEST",
+  "scenario_name": "...",
+  "endpoints_to_hit": ["endpoint_id_1", "endpoint_id_2"],
+  "users": 100,
+  "spawn_rate": 10,
+  "reason": "The user wants to ensure the signup flow doesn't crash under pressure"
+}}
+
+Type D: FINISH
+{{ "type": "FINISH", "reason": "Story fully verified." }}
 """
 
     def _get_next_action(self):
         """Calls LLM to decide the next move based on history."""
         try:
-            payload = {
-                "model": self.model,
-                "messages": self.history,
-                "temperature": 0.2, # Low temp for precise actions
-                "response_format": {"type": "json_object"}
-            }
+            if self.provider == "gemini":
+                # NATIVE GEMINI JSON MODE
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.gemini_api_key}"
+                
+                # Convert history to Gemini format (user/model instead of user/assistant)
+                contents = []
+                for msg in self.history:
+                    role = "user" if msg["role"] in ["user", "system"] else "model"
+                    contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+                
+                payload = {
+                    "contents": contents,
+                    "generationConfig": {
+                        "response_mime_type": "application/json",
+                        "temperature": 0.2
+                    }
+                }
+                resp = requests.post(url, json=payload, timeout=30)
+                resp.raise_for_status()
+                content = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            else:
+                # OPENAI FLOW
+                url = "https://api.openai.com/v1/chat/completions"
+                payload = {
+                    "model": self.model,
+                    "messages": self.history,
+                    "temperature": 0.2,
+                    "response_format": {"type": "json_object"}
+                }
+                headers = {"Authorization": f"Bearer {self.openai_api_key}", "Content-Type": "application/json"}
+                resp = requests.post(url, json=payload, headers=headers, timeout=30)
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"]
             
-            headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-            resp = requests.post(f"{self.base_url}/chat/completions", json=payload, headers=headers, timeout=30)
-            resp.raise_for_status()
-            
-            content = resp.json()["choices"][0]["message"]["content"]
-            # Append assistant's thought to history (so it remembers its own plan)
+            # Append assistant's thought to history
             self.history.append({"role": "assistant", "content": content})
-            
             return json.loads(content)
         except Exception as e:
             logger.error(f"Agent Brain Failure: {e}")
