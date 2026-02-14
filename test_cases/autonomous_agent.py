@@ -149,30 +149,100 @@ class AutonomousAgent:
         return steps_log
 
     def _execute_browser_action(self, action):
-        """Simulates a browser interaction using Playwright."""
+        """Simulates a browser interaction using Playwright and captures visual data."""
         from playwright.sync_api import sync_playwright
+        import os
+        import base64
+        import tempfile
+
         logger.info(f"[Agent] Browser Action: {action.get('action')} on {action.get('url') or action.get('selector')}")
         
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
-                # Use a context to persist state if needed, but for now we do atomic steps
                 page = browser.new_page()
                 
+                # Execution
                 if action.get("action") == "navigate":
                     page.goto(action.get("url"))
-                elif action.get("click"):
+                elif action.get("action") == "click":
                     page.click(action.get("selector"))
-                elif action.get("type"):
+                elif action.get("action") == "type":
                     page.fill(action.get("selector"), action.get("value"))
                 
-                # Capture a summary of the page state
-                content = page.content()[:1000]
+                # Post-action Wait
+                page.wait_for_timeout(2000) 
+
+                # THE VISUAL FEED (Taking the Screenshot)
+                screenshot_path = os.path.join(tempfile.gettempdir(), f"agent_sc_{int(time.time())}.png")
+                page.screenshot(path=screenshot_path)
+                
+                # Analyze with Vision
+                with open(screenshot_path, "rb") as f:
+                    b64_image = base64.b64encode(f.read()).decode('utf-8')
+                
+                visual_summary = self._analyze_vision(b64_image)
+                
+                # Metadata
                 title = page.title()
+                content_preview = page.content()[:500]
+                
                 browser.close()
-                return {"status": "success", "title": title, "page_preview": content}
+                
+                # Cleanup
+                if os.path.exists(screenshot_path):
+                    os.remove(screenshot_path)
+
+                return {
+                    "status": "success", 
+                    "title": title, 
+                    "visual_observation": visual_summary,
+                    "html_preview": content_preview
+                }
         except Exception as e:
             return {"status": "error", "error": str(e)}
+
+    def _analyze_vision(self, b64_image):
+        """Uses the Vision LLM to 'see' the screenshot."""
+        prompt = "Describe what you see on this screen. Identify any visible error messages, broken layouts, or if the page looks correct according to the action performed. Be concise."
+        
+        try:
+            if self.provider == "gemini":
+                # Use Gemini 1.5/2.5 Flash for vision
+                model_name = "gemini-1.5-flash" # Optimized for vision
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.gemini_api_key}"
+                payload = {
+                    "contents": [{
+                        "parts": [
+                            {"text": prompt},
+                            {"inline_data": {"mime_type": "image/png", "data": b64_image}}
+                        ]
+                    }]
+                }
+                resp = requests.post(url, json=payload, timeout=30)
+                resp.raise_for_status()
+                return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            else:
+                # OpenAI Vision
+                url = "https://api.openai.com/v1/chat/completions"
+                payload = {
+                    "model": "gpt-4o-mini",
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}
+                        ]
+                    }],
+                    "max_tokens": 300
+                }
+                headers = {"Authorization": f"Bearer {self.openai_api_key}", "Content-Type": "application/json"}
+                resp = requests.post(url, json=payload, headers=headers, timeout=30)
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"Vision Analysis Failed: {e}")
+            return "Vision system unavailable, relying on HTML observation."
 
     def _execute_stress_test(self, action, endpoint_map):
         """Executes a simple high-concurrency stress test."""
@@ -220,14 +290,14 @@ AVAILABLE API ENDPOINTS:
 
 YOUR TOOLSET:
 1. CALL_API: Use this for functional backend testing and state preparation.
-2. BROWSER_ACTION: Use this to test the UI/UX. You can navigate, click, and type via Playwright.
-3. STRESS_TEST: Use this if the user wants to test performance or high load. You will define the scenario.
+2. BROWSER_ACTION: Use this to test the UI/UX. You have "EYES" – after every browser action, you will receive a visual description of what the page actually looks like. Use this to verify buttons, error messages, and layouts.
+3. STRESS_TEST: Use this if the user wants to test performance.
 
 INSTRUCTIONS:
 1. UNDERSTUDY: Look at the whole collection map before your first move.
-2. STRATEGIZE: If the story is about "User Experience", start with BROWSER_ACTION. If it's "API Reliability", use CALL_API.
-3. ADAPT: If an API call fails, don't just die. Think: "Did I miss a header? Do I need to login first?" and fix it.
-4. MISSION COMPLETE: Only finish when the story is truly verified across both API and (if needed) UI.
+2. STRATEGIZE: If the story is about "User Experience", start with BROWSER_ACTION.
+3. ADAPT: If a visual check shows an error (e.g., "Invalid Login Creds"), adapt your next move!
+4. MISSION COMPLETE: Only finish when the story is truly verified across both API and UI.
 
 OUTPUT FORMAT (JSON ONLY):
 Return a JSON object:
