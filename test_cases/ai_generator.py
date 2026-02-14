@@ -16,7 +16,7 @@ class AITestGenerator:
         
         # Using latest 2026 state-of-the-art models
         if self.provider == "gemini":
-            self.model = getattr(settings, 'GEMINI_MODEL', 'gemini-3-flash')
+            self.model = getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash')
         else:
             self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
             
