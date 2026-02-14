@@ -23,7 +23,7 @@ class AutonomousAgent:
         
         # Intelligent Model Selection (2026 Fleet)
         if self.provider == "gemini":
-            self.model = getattr(settings, 'GEMINI_MODEL', 'gemini-3-flash')
+            self.model = getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash')
         else:
             self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
 
