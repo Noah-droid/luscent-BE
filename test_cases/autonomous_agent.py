@@ -321,8 +321,9 @@ YOUR TOOLSET:
 
 INSTRUCTIONS:
 1. FOCUS: Your primary mission objective is to cover the scenarios: {self.scenarios}.
-2. STRATEGIZE: If SECURITY is a scenario, look for broken auth or injection points. If EDGE_CASE, try weird values.
-3. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY. 
+2. SCHEMA OBSESSION: Before calling any API, check its 'request_body' field in the AVAILABLE API ENDPOINTS list. This is your MANDATORY template. Match its keys and casing (e.g. 'first_name' vs 'FirstName') EXACTLY. Do not use your intuition; use the schema.
+3. STRATEGIZE: If SECURITY is a scenario, look for broken auth or injection points. If EDGE_CASE, try weird values.
+4. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY for the correct keys. 
    - If the server says "FirstName is required", look at your casing! (e.g. maybe it wants 'FirstName' instead of 'firstName').
    - Use the exact keys the server's error message suggests.
 4. MISSION COMPLETE: You successfully finish when the intent of the User Story is verified. 
