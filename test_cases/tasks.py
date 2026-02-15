@@ -199,8 +199,12 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     
     # 3. Run The Mission (Blocking Call - The Agent thinks and acts)
     try:
-        steps_log = agent.run_mission(max_steps=15)
-        logger.info(f"[CollectionAutoPilot] Agent completed {len(steps_log)} steps.")
+        # Increase max_steps if multiple scenarios are provided
+        scenario_list = scenarios if isinstance(scenarios, list) else (scenarios.split(',') if isinstance(scenarios, str) else [])
+        mission_depth = 30 if len(scenario_list) > 2 else 15
+        
+        steps_log = agent.run_mission(max_steps=mission_depth)
+        logger.info(f"[CollectionAutoPilot] Agent completed {len(steps_log)} steps for {len(scenario_list)} scenarios.")
         
         # 4. Convert Agent Logs to Test Runs (For Dashboard Visibility)
         for step in steps_log:

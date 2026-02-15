@@ -320,7 +320,9 @@ YOUR TOOLSET:
 {"3. STRESS_TEST: Use this if the user wants to test performance." if has_load else ""}
 
 INSTRUCTIONS:
-1. FOCUS: Your primary mission objective is to cover the scenarios: {self.scenarios}.
+1. FOCUS & PIVOT: Your core goal is to verify ALL MISSION SCENARIOS: {self.scenarios}. Do not spend all your steps on just one!
+   - As soon as you get a 2xx success for a "HAPPY_PATH" action, immediately PIVOT to a different scenario (like AUTH_ERROR or SECURITY) for that same feature.
+   - If you are stuck on Happy Path for more than 3 attempts, move to a different endpoint or scenario to maximize coverage.
 2. SCHEMA OBSESSION: Before calling any API, check its 'request_body' field in the AVAILABLE API ENDPOINTS list. This is your MANDATORY template. Match its keys and casing (e.g. 'first_name' vs 'FirstName') EXACTLY. Do not use your intuition; use the schema.
 3. STRATEGIZE: If SECURITY is a scenario, look for broken auth or injection points. If EDGE_CASE, try weird values.
 4. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY for the correct keys. 
