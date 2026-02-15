@@ -208,29 +208,37 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
         logger.info(f"[CollectionAutoPilot] Agent completed {len(steps_log)} steps for {len(scenario_list)} scenarios.")
         
         # 4. Convert Agent Logs to Test Runs (For Dashboard Visibility)
+        mission_summary = ""
         for step in steps_log:
+            if step['action'] == 'FINISH':
+                mission_summary = step.get('reason', '')
+                continue
+
             if step['action'] == 'CALL_API':
-                # Find endpoint
+                # ... (Endpoint lookup)
                 endpoint = collection.endpoints.filter(method=step['method'], url=step['url']).first()
                 if not endpoint:
-                    # Fallback lookup by name or path match if URL resolved dynamically
                     endpoint = collection.endpoints.filter(url__icontains=step['url']).first()
                 
                 # Create a "Record" of what the agent did
                 test_case = TestCase.objects.create(
-                    endpoint=endpoint, # Can be null if agent invented a path
+                    endpoint=endpoint,
                     name=f"Step {step['step']}: {step['endpoint']}",
-                    description=f"Action: {step['reason']}", # Store the thinking here!
+                    description=f"Action: {step['reason']}",
                     runner_type="http",
                     category=categories[0] if isinstance(categories, list) and categories else "functional", 
                     layer=layer,
                     tags=[f"SCENARIO:{s}" for s in scenarios.split(',')] if isinstance(scenarios, str) else [f"SCENARIO:{scenarios}"],
                     ai_generated=True,
                     user_story=final_story,
-                    assertions=[{"type": "status", "value": step['response']['status']}] # Implicit assertion
+                    assertions=[{"type": "status", "value": step['response']['status']}]
                 )
                 
-                # Save the Run Result
+                # Append the Master Summary to the primary/first run for notification extractor
+                final_logs = f"AI THOUGHT: {step['reason']}\n\nREQUEST:\n{json.dumps(step['request'], indent=2)}\n\nRESPONSE:\n{step['response']['body']}"
+                if mission_summary:
+                    final_logs = f"MISSION_SUMMARY: {mission_summary}\n\n" + final_logs
+
                 TestRun.objects.create(
                     test_case=test_case,
                     batch_id=batch_id,
@@ -238,7 +246,7 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
                     response_status=step['response']['status'],
                     response_body=step['response']['body'],
                     response_time_ms=step['response']['duration_ms'],
-                    logs=f"AI THOUGHT: {step['reason']}\n\nREQUEST:\n{json.dumps(step['request'], indent=2)}\n\nRESPONSE:\n{step['response']['body']}",
+                    logs=final_logs,
                     triggered_by="ai_agent"
                 )
     except Exception as e:

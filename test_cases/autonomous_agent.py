@@ -143,9 +143,10 @@ class AutonomousAgent:
                 
                 try:
                     start_time = time.time()
+                    resolved_url = self._resolve_url(target['url'], action.get("payload", {}).get("params", {}))
                     response = self.session.request(
                         method=target['method'],
-                        url=self._resolve_url(target['url']),
+                        url=resolved_url,
                         headers=req_data.get("headers", {}),
                         json=req_data.get("body") if target['method'] in ['POST', 'PUT', 'PATCH'] else None,
                         params=req_data.get("params"),
@@ -470,16 +471,24 @@ Type D: FINISH
         # if we want to support {{var}} syntax injects. For now, we trust the Agent's generated JSON.
         return payload
 
-    def _resolve_url(self, url_path):
-        """Combines base URL with path."""
-        # Assuming collection has a base_url, or we rely on the path being absolute
-        # For this implementation, we assume the agent receives full paths or we prepend collection base
-        if url_path.startswith("http"):
-            return url_path
+    def _resolve_url(self, url_path, params=None):
+        """Combines base URL with path and resolves path parameters like {id}."""
+        import re
+        
+        final_path = url_path
+        # Interpolate path parameters if they exist in params
+        if params:
+            for key, value in params.items():
+                pattern = f"{{{key}}}"
+                if pattern in final_path:
+                    final_path = final_path.replace(pattern, str(value))
+        
+        if final_path.startswith("http"):
+            return final_path
         
         base = self.collection.base_url or ""
         if base and not base.endswith("/"): base += "/"
-        return base + url_path.lstrip("/")
+        return base + final_path.lstrip("/")
 
     def _truncate_body(self, text, limit=500):
         if len(text) > limit:
