@@ -49,13 +49,25 @@ class AutonomousAgent:
         logger.info(f"[Agent] Starting mission for {self.collection.name}: {self.user_story}")
         
         # 1. Understudy: Initialize Context
-        # We now include the schema (request_body, query_params) so the Agent doesn't have to guess keys.
-        endpoints = list(self.collection.endpoints.values(
+        # We now include the schema and ensure IDs are strings for the JSON prompt.
+        endpoints_raw = list(self.collection.endpoints.values(
             'id', 'method', 'url', 'name', 'description', 
             'request_body', 'query_params'
         ))
-        endpoint_map = {str(e['id']): e for e in endpoints}
         
+        # Format for AI: Convert UUIDs to strings and clean up
+        endpoints = []
+        for e in endpoints_raw:
+            e_fixed = e.copy()
+            e_fixed['id'] = str(e['id'])
+            endpoints.append(e_fixed)
+            
+        endpoint_map = {str(e['id']): e for e in endpoints_raw}
+        
+        logger.info(f"[Agent] Discovery complete. Map size: {len(endpoints)} endpoints.")
+        for e in endpoints:
+            logger.info(f"  - {e['method']} {e['url']} ({e['name']})")
+
         system_prompt = self._build_system_prompt(endpoints)
         self.history.append({"role": "system", "content": system_prompt})
         
@@ -64,9 +76,14 @@ class AutonomousAgent:
         # 2. The Loop
         correction_count = 0
         for step_i in range(1, max_steps + 1):
-            logger.info(f"[Agent] Thinking... (Step {step_i}/{max_steps})")
+            logger.info(f"--- [Step {step_i}/{max_steps}] Thinking ---")
             
             action = self._get_next_action()
+            
+            # Log the Agent's Decision for visibility
+            reason = action.get('reason', 'No reason provided')
+            action_type = action.get('type', 'UNKNOWN')
+            logger.info(f"[Agent Decision] Type: {action_type} | Reason: {reason}")
             
             if action.get("type") == "FINISH":
                 logger.info(f"[Agent] Mission Complete: {action.get('reason')}")
@@ -109,8 +126,16 @@ class AutonomousAgent:
                 endpoint_id = action.get("endpoint_id")
                 target = endpoint_map.get(endpoint_id)
                 
+                # Resilient Fallback: If AI sent a URL/Path instead of an ID, try to find it
                 if not target:
-                    self._record_observation(f"Error: Endpoint ID {endpoint_id} not found.")
+                    logger.warning(f"[Agent] ID {endpoint_id} not found. Trying URL fallback.")
+                    for e_id, e_val in endpoint_map.items():
+                        if e_val['url'] == endpoint_id or (endpoint_id and endpoint_id in e_val['url']):
+                            target = e_val
+                            break
+                            
+                if not target:
+                    self._record_observation(f"Error: Endpoint ID '{endpoint_id}' not found in the mission map. Please use the exact 'id' field from the list.")
                     continue
 
                 logger.info(f"[Agent] Executing {target['method']} {target['url']}")
@@ -315,15 +340,16 @@ AVAILABLE API ENDPOINTS:
 {json.dumps(endpoints, indent=2)}
 
 YOUR TOOLSET:
-{"1. CALL_API: Use this for functional backend testing." if has_http else ""}
+{"1. CALL_API: Use this for functional backend testing. You MUST provide the 'endpoint_id' from the AVAILABLE API ENDPOINTS list above." if has_http else ""}
 {"2. BROWSER_ACTION: Use this to test the UI/UX via Playwright. You have visual capabilities." if has_browser else ""}
 {"3. STRESS_TEST: Use this if the user wants to test performance." if has_load else ""}
 
 INSTRUCTIONS:
-1. FOCUS & PIVOT: Your core goal is to verify ALL MISSION SCENARIOS: {self.scenarios}. Do not spend all your steps on just one!
+1. FOCUS & PIVOT: Your core goal is to verify ALL MISSION SCENARIOS: {self.scenarios}. 
+   - CRITICAL: You are NOT ALLOWED to call 'FINISH' until you have actually performed at least one CALL_API or BROWSER_ACTION for each mission scenario. 
    - As soon as you get a 2xx success for a "HAPPY_PATH" action, immediately PIVOT to a different scenario (like AUTH_ERROR or SECURITY) for that same feature.
-   - If you are stuck on Happy Path for more than 3 attempts, move to a different endpoint or scenario to maximize coverage.
-2. SCHEMA OBSESSION: Before calling any API, check its 'request_body' field in the AVAILABLE API ENDPOINTS list. This is your MANDATORY template. Match its keys and casing (e.g. 'first_name' vs 'FirstName') EXACTLY. Do not use your intuition; use the schema.
+2. COMPLIANCE CHECKLIST: Before every move, mentally check off which scenarios from {self.scenarios} you have already verified. Do not finish until the list is complete.
+3. SCHEMA OBSESSION: Before calling any API, check its 'request_body' field in the AVAILABLE API ENDPOINTS list. This is your MANDATORY template. Match its keys and casing EXACTLY.
 3. STRATEGIZE: If SECURITY is a scenario, look for broken auth or injection points. If EDGE_CASE, try weird values.
 4. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY for the correct keys. 
    - If the server says "FirstName is required", look at your casing! (e.g. maybe it wants 'FirstName' instead of 'firstName').
