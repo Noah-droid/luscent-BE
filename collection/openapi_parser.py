@@ -109,17 +109,26 @@ def parse_paths_to_endpoints(spec: dict, project_obj=None, default_base_url=None
                 if effective_base and not effective_base.endswith("/"):
                     effective_base += "/"
 
-                # Improved Schema Extraction
+                # Improved Schema Extraction with Ref Resolution
                 request_body = {}
+                
+                def resolve_schema(s):
+                    if not isinstance(s, dict): return {}
+                    if "$ref" in s:
+                        ref_path = s["$ref"].split("/")
+                        ref_key = ref_path[-1]
+                        # Look in definitions (Swagger 2) or components/schemas (OpenAPI 3)
+                        definitions = spec.get("definitions", {}) or spec.get("components", {}).get("schemas", {})
+                        return resolve_schema(definitions.get(ref_key, {}))
+                    return s.get("properties") or s.get("example") or s
+
                 rb_obj = op_obj.get("requestBody")
                 if rb_obj and isinstance(rb_obj, dict):
                     content = rb_obj.get("content", {})
-                    # Try to get the schema from the first available media type (usually application/json)
                     for _, media_type in content.items():
-                        schema = media_type.get("schema", {})
-                        if schema:
-                            # If it's a ref, the AI will still see the ID, but we try to provide info
-                            request_body = schema.get("properties") or schema.get("example") or schema
+                        schema_obj = media_type.get("schema", {})
+                        if schema_obj:
+                            request_body = resolve_schema(schema_obj)
                             break
                 
                 # Fallback and Parameter Flattening (for Swagger 2 or Query Params)
@@ -127,19 +136,14 @@ def parse_paths_to_endpoints(spec: dict, project_obj=None, default_base_url=None
                 params = op_obj.get("parameters", [])
                 for p in params:
                     if not isinstance(p, dict): continue
-                    
                     p_name = p.get("name")
                     p_in = p.get("in")
                     
                     if p_in == "body" and not request_body:
-                        # Swagger 2 Body
-                        schema = p.get("schema", {})
-                        request_body = schema.get("properties") or schema.get("example") or schema
+                        request_body = resolve_schema(p.get("schema", {}))
                     elif p_in == "formData":
-                        # Swagger 2 Form Data
                         request_body[p_name] = p.get("type", "string")
                     elif p_in == "query":
-                        # Collect query params for the brain too
                         flattened_query[p_name] = p.get("type", "string")
 
                 endpoint = {

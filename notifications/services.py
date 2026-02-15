@@ -105,9 +105,9 @@ def send_test_run_report(test_run):
         
         # Simple HTML Template
         html_content = f"""
-        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="font-family: ubuntu; max-width: 600px; margin: 0 auto;">
             <div style="background-color: #000; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-                <h1 style="color: #fff; margin: 0;">QAi Test Report</h1>
+                <h1 style="color: #000; margin: 0;">Luscent Test Report</h1>
             </div>
             <div style="padding: 20px; border: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
                 <p>Hello {user.username or 'there'},</p>
@@ -199,7 +199,11 @@ def send_batch_report(batch_id, user):
         <tr style="border-bottom: 1px solid #edf2f7;">
             <td style="padding: 16px 12px; vertical-align: top;">
                 <div style="font-weight: 600; color: #2d3748;">{run.test_case.name}</div>
-                <div style="font-size: 12px; color: #718096; margin-top: 4px;">{ai_thought or detail_desc}</div>
+                <div style="font-size: 11px; font-family: monospace; color: #4a5568; margin-top: 4px; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; display: inline-block;">
+                    {run.test_case.endpoint.method if run.test_case.endpoint else 'AI'} {run.test_case.endpoint.url if run.test_case.endpoint else 'Dynamic Path'}
+                </div>
+                <div style="font-size: 12px; color: #718096; margin-top: 8px; line-height: 1.4;">{ai_thought or detail_desc}</div>
+                {f'<div style="font-size: 11px; color: #e53e3e; margin-top: 8px; background: #fff5f5; padding: 8px; border: 1px solid #feb7b7; border-radius: 4px; font-family: monospace;"><strong>Error:</strong> {run.response_body if isinstance(run.response_body, str) else json.dumps(run.response_body)[:200]}</div>' if run.status != 'passed' else ''}
             </td>
             <td style="padding: 16px 12px; vertical-align: top; text-align: center;">
                 <span style="background-color: {s_color}15; color: {s_color}; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; text-transform: uppercase;">
@@ -232,7 +236,7 @@ def send_batch_report(batch_id, user):
         <div style="max-width: 650px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
             <!-- Header -->
             <div style="background: linear-gradient(135deg, #1a202c 0%, #2d3748 100%); padding: 32px 24px; text-align: center;">
-                <h1 style="color: #ffffff; margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.025em;">QAi Mission Control</h1>
+                <h1 style="color: #ffffff; margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.025em;">Luscent Mission Control</h1>
                 <p style="color: #a0aec0; margin: 8px 0 0 0; font-size: 14px;">{title}</p>
             </div>
             
@@ -280,7 +284,7 @@ def send_batch_report(batch_id, user):
                     </p>
                     <p style="font-size: 12px; color: #a0aec0;">
                         Batch ID: {batch_id} <br>
-                        Sent via QAi Autonomous Engine • {runs.first().executed_at.strftime('%Y-%m-%d %H:%M:%S UTC')}
+                        Sent via Luscent Autonomous Engine • {runs.first().executed_at.strftime('%Y-%m-%d %H:%M:%S UTC')}
                     </p>
                 </div>
             </div>
