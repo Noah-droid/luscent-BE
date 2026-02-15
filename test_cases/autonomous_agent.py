@@ -59,6 +59,21 @@ class AutonomousAgent:
             # DECIDE ACTION
             action = self._get_next_action()
             
+            if action.get("type") == "FINISH":
+                logger.info(f"[Agent] Mission Complete: {action.get('reason')}")
+                steps_log.append({
+                    "step": step_i,
+                    "action": "FINISH",
+                    "reason": action.get("reason"),
+                    "status": "success"
+                })
+                break
+                
+            if action.get("type") == "ERROR":
+                logger.error(f"[Agent] Brain Error: {action.get('reason')}")
+                self._record_observation(f"Error from Brain: {action.get('reason')}. Retrying with different thought.")
+                continue
+
             if action.get("type") == "BROWSER_ACTION":
                 # EXECUTE BROWSER STEP
                 result = self._execute_browser_action(action)
@@ -380,7 +395,23 @@ Type D: FINISH
             
             # Append assistant's thought to history
             self.history.append({"role": "assistant", "content": content})
-            return json.loads(content)
+            
+            # Robust JSON Parsing
+            try:
+                action = json.loads(content)
+                # If the LLM returned a list of actions, just take the first one
+                if isinstance(action, list) and len(action) > 0:
+                    action = action[0]
+                
+                if not isinstance(action, dict):
+                    logger.error(f"Agent Action is not a dict: {type(action)}")
+                    return {"type": "ERROR", "reason": "LLM returned invalid action format (not a dict)."}
+                
+                return action
+            except json.JSONDecodeError as je:
+                logger.error(f"Agent JSON Parse Error: {je} | Raw: {content}")
+                return {"type": "ERROR", "reason": f"LLM returned non-JSON content: {content[:100]}"}
+                
         except Exception as e:
             logger.error(f"Agent Brain Failure: {e}")
             return {"type": "FINISH", "reason": f"Agent crashed: {e}"}
