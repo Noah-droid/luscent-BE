@@ -199,10 +199,10 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     
     # 3. Run The Mission (Blocking Call - The Agent thinks and acts)
     try:
-        # Increase max_steps if multiple scenarios or long stories are provided
+        # Increase max_steps for deep multi-scenario testing
         scenario_list = scenarios if isinstance(scenarios, list) else (scenarios.split(',') if isinstance(scenarios, str) else [])
-        story_length_bonus = 20 if len(final_story) > 1000 else 0
-        mission_depth = min(50, (15 + (len(scenario_list) * 5) + story_length_bonus))
+        story_length_bonus = 30 if len(final_story) > 1000 else 0
+        mission_depth = min(100, (20 + (len(scenario_list) * 10) + story_length_bonus))
         
         steps_log = agent.run_mission(max_steps=mission_depth)
         logger.info(f"[CollectionAutoPilot] Agent completed {len(steps_log)} steps for {len(scenario_list)} scenarios.")
