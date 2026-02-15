@@ -223,6 +223,20 @@ def send_batch_report(batch_id, user):
     </div>
     """ if user_story else ""
 
+    # Extract Executive Summary if it exists
+    exec_summary = ""
+    for run in runs:
+        if run.logs and "MISSION_SUMMARY:" in run.logs:
+            exec_summary = run.logs.split("MISSION_SUMMARY:")[1].split("\n\n")[0].strip()
+            break
+            
+    summary_section = f"""
+    <div style="background-color: #ebf8ff; border: 1px solid #90cdf4; padding: 16px; margin-bottom: 24px; border-radius: 8px; color: #2b6cb0;">
+        <div style="font-size: 11px; font-weight: bold; text-transform: uppercase; margin-bottom: 4px;">Executive Mission Summary</div>
+        <div style="font-size: 13px; line-height: 1.5; font-weight: 500;">{exec_summary}</div>
+    </div>
+    """ if exec_summary else ""
+
     html_content = f"""
     <!DOCTYPE html>
     <html>
@@ -243,6 +257,7 @@ def send_batch_report(batch_id, user):
             <div style="padding: 32px 24px;">
                 {story_section}
                 {metadata_bar}
+                {summary_section}
                 
                 <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px; text-align: center;">
                     <div style="background-color: #f8fafc; padding: 16px; border-radius: 8px; border: 1px solid #edf2f7;">
