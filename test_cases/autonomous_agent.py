@@ -44,7 +44,11 @@ class AutonomousAgent:
         logger.info(f"[Agent] Starting mission for {self.collection.name}: {self.user_story}")
         
         # 1. Understudy: Initialize Context
-        endpoints = list(self.collection.endpoints.values('id', 'method', 'url', 'name', 'description'))
+        # We now include the schema (request_body, query_params) so the Agent doesn't have to guess keys.
+        endpoints = list(self.collection.endpoints.values(
+            'id', 'method', 'url', 'name', 'description', 
+            'request_body', 'query_params'
+        ))
         endpoint_map = {str(e['id']): e for e in endpoints}
         
         system_prompt = self._build_system_prompt(endpoints)
@@ -53,10 +57,10 @@ class AutonomousAgent:
         steps_log = []
         
         # 2. The Loop
+        correction_count = 0
         for step_i in range(1, max_steps + 1):
             logger.info(f"[Agent] Thinking... (Step {step_i}/{max_steps})")
             
-            # DECIDE ACTION
             action = self._get_next_action()
             
             if action.get("type") == "FINISH":
@@ -65,56 +69,48 @@ class AutonomousAgent:
                     "step": step_i,
                     "action": "FINISH",
                     "reason": action.get("reason"),
+                    "self_correction_count": correction_count,
                     "status": "success"
                 })
                 break
                 
             if action.get("type") == "ERROR":
+                correction_count += 1
                 logger.error(f"[Agent] Brain Error: {action.get('reason')}")
-                self._record_observation(f"Error from Brain: {action.get('reason')}. Retrying with different thought.")
+                self._record_observation(f"Error from Brain: {action.get('reason')}. Retrying.")
                 continue
 
             if action.get("type") == "BROWSER_ACTION":
-                # EXECUTE BROWSER STEP
                 result = self._execute_browser_action(action)
                 steps_log.append({
-                    "step": step_i,
-                    "action": "BROWSER_ACTION",
-                    "details": action,
-                    "response": result,
+                    "step": step_i, "action": "BROWSER_ACTION",
+                    "details": action, "response": result,
                     "status": "passed" if not result.get("error") else "failed"
                 })
                 self._record_observation(f"Browser Result: {json.dumps(result)}")
                 continue
 
             if action.get("type") == "STRESS_TEST":
-                # EXECUTE LOAD TEST
                 result = self._execute_stress_test(action, endpoint_map)
                 steps_log.append({
-                    "step": step_i,
-                    "action": "STRESS_TEST",
-                    "details": action,
-                    "response": result,
+                    "step": step_i, "action": "STRESS_TEST",
+                    "details": action, "response": result,
                     "status": "passed" if not result.get("error") else "failed"
                 })
                 self._record_observation(f"Stress Test Result: {json.dumps(result)}")
                 continue
 
             if action.get("type") == "CALL_API":
-                # EXECUTE API CALL
                 endpoint_id = action.get("endpoint_id")
                 target = endpoint_map.get(endpoint_id)
                 
                 if not target:
-                    self._record_observation(f"Error: Endpoint ID {endpoint_id} not found in collection map.")
+                    self._record_observation(f"Error: Endpoint ID {endpoint_id} not found.")
                     continue
 
                 logger.info(f"[Agent] Executing {target['method']} {target['url']}")
-                
-                # Dynamic Data Injection
                 req_data = self._prepare_request(action.get("payload", {}))
                 
-                # Perform the Request
                 try:
                     start_time = time.time()
                     response = self.session.request(
@@ -127,7 +123,6 @@ class AutonomousAgent:
                     )
                     duration = round((time.time() - start_time) * 1000, 2)
                     
-                    # Capture Result
                     result_summary = {
                         "status": response.status_code,
                         "reason": response.reason,
@@ -135,7 +130,10 @@ class AutonomousAgent:
                         "duration_ms": duration
                     }
                     
-                    # Log for the User
+                    is_passed = 200 <= response.status_code < 300
+                    if not is_passed:
+                        correction_count += 1 # Tracking the self-correction effort
+                    
                     steps_log.append({
                         "step": step_i,
                         "action": "CALL_API",
@@ -144,21 +142,18 @@ class AutonomousAgent:
                         "url": target['url'],
                         "request": req_data,
                         "response": result_summary,
-                        "status": "passed" if response.status_code < 500 else "failed"
+                        "status": "passed" if is_passed else "failed"
                     })
                     
-                    # Feed Observation back to Agent
                     observation = f"API Response: {response.status_code} {response.reason}\nBody: {result_summary['body']}"
                     self._record_observation(observation)
                     
                 except Exception as e:
+                    correction_count += 1
                     logger.error(f"[Agent] Step failed: {e}")
-                    self._record_observation(f"System Error Exception: {str(e)}")
+                    self._record_observation(f"System Error: {str(e)}")
                     steps_log.append({
-                        "step": step_i,
-                        "action": "ERROR",
-                        "error": str(e),
-                        "status": "error"
+                        "step": step_i, "action": "ERROR", "error": str(e), "status": "error"
                     })
 
         return steps_log
@@ -311,8 +306,12 @@ YOUR TOOLSET:
 INSTRUCTIONS:
 1. UNDERSTUDY: Look at the whole collection map before your first move.
 2. STRATEGIZE: If the story is about "User Experience", start with BROWSER_ACTION.
-3. ADAPT: If a visual check shows an error (e.g., "Invalid Login Creds"), adapt your next move!
-4. MISSION COMPLETE: Only finish when the story is truly verified across both API and UI.
+3. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY. 
+   - If the server says "FirstName is required", look at your casing! (e.g. maybe it wants 'FirstName' instead of 'firstName').
+   - Use the exact keys the server's error message suggests.
+4. MISSION COMPLETE: You successfully finish when the intent of the User Story is verified. 
+   - This usually means 2xx success, but if the story is a "Negative Test" (e.g., "Verify that unauthenticated users get blocked"), then a 403/401 is actually your goal!
+   - Explain your result clearly in the FINISH reason.
 
 OUTPUT FORMAT (JSON ONLY):
 Return a JSON object:
