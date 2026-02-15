@@ -158,54 +158,135 @@ def send_batch_report(batch_id, user):
     passed = runs.filter(status="passed").count()
     failed = runs.filter(status__in=["failed", "error"]).count()
     
-    # Identify if it was a scheduled check
+    # Identify if it was an AI mission
+    first_run = runs.first()
+    is_ai_agent = first_run.triggered_by == "ai_agent"
+    test_case = first_run.test_case
+    user_story = test_case.user_story if is_ai_agent else None
+    
+    # Extract Metadata
+    category = test_case.category.upper() if test_case.category else "FUNCTIONAL"
+    layer = test_case.layer.upper() if test_case.layer else "BACKEND"
+    tags = test_case.tags if test_case.tags else []
+    scenarios = ", ".join([t.replace("SCENARIO:", "") for t in tags if t.startswith("SCENARIO:")])
+    
     is_scheduled = runs.filter(triggered_by="scheduled").exists()
-    title = "Scheduled Uptime Report" if is_scheduled else "Batch Execution Report"
+    title = "AI Mission Execution Report" if is_ai_agent else ("Scheduled Uptime Report" if is_scheduled else "Batch Execution Report")
+
+    # Build Metadata Bar
+    metadata_bar = f"""
+    <div style="display: flex; gap: 10px; margin-bottom: 20px; font-size: 11px; font-weight: bold; color: #718096; text-transform: uppercase;">
+        <span style="background: #edf2f7; padding: 4px 8px; border-radius: 4px;">📂 {category}</span>
+        <span style="background: #edf2f7; padding: 4px 8px; border-radius: 4px;">💻 {layer}</span>
+        {f'<span style="background: #edf2f7; padding: 4px 8px; border-radius: 4px;">🎯 {scenarios}</span>' if scenarios else ''}
+    </div>
+    """
 
     # Build summarized table
     rows = ""
     for run in runs:
         s_color = "#22c55e" if run.status == "passed" else "#ef4444"
+        # Extract AI Thought if present (stored prefix in logs)
+        ai_thought = ""
+        if is_ai_agent and run.logs:
+             thought_line = [l for l in run.logs.split("\n") if l.startswith("AI THOUGHT:")]
+             if thought_line:
+                 ai_thought = thought_line[0].replace("AI THOUGHT:", "").strip()
+        
+        detail_desc = run.test_case.description if is_ai_agent else f"Code: {run.response_status or 'N/A'}"
+        
         rows += f"""
-        <tr>
-            <td style="padding: 10px; border-bottom: 1px solid #eee;">{run.test_case.name}</td>
-            <td style="padding: 10px; border-bottom: 1px solid #eee; color: {s_color}; font-weight: bold;">{run.status.upper()}</td>
-            <td style="padding: 10px; border-bottom: 1px solid #eee;">{run.response_time_ms}ms</td>
+        <tr style="border-bottom: 1px solid #edf2f7;">
+            <td style="padding: 16px 12px; vertical-align: top;">
+                <div style="font-weight: 600; color: #2d3748;">{run.test_case.name}</div>
+                <div style="font-size: 12px; color: #718096; margin-top: 4px;">{ai_thought or detail_desc}</div>
+            </td>
+            <td style="padding: 16px 12px; vertical-align: top; text-align: center;">
+                <span style="background-color: {s_color}15; color: {s_color}; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; text-transform: uppercase;">
+                    {run.status}
+                </span>
+            </td>
+            <td style="padding: 16px 12px; vertical-align: top; text-align: right; color: #718096; font-size: 13px;">
+                {run.response_time_ms}ms
+            </td>
         </tr>
         """
 
-    html_content = f"""
-    <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e5e7eb; border-radius: 8px;">
-        <div style="background-color: #111; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-            <h2 style="color: #fff; margin: 0;">{title}</h2>
-        </div>
-        <div style="padding: 20px;">
-            <p>Summary for Batch: <code style="background: #f3f4f6; padding: 2px 4px;">{batch_id}</code></p>
-            
-            <div style="display: flex; justify-content: space-around; background: #f9fafb; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center;">
-                <div><div style="font-size: 20px; font-weight: bold;">{total}</div><div style="font-size: 12px; color: #666;">Total</div></div>
-                <div><div style="font-size: 20px; font-weight: bold; color: #22c55e;">{passed}</div><div style="font-size: 12px; color: #666;">Passed</div></div>
-                <div><div style="font-size: 20px; font-weight: bold; color: #ef4444;">{failed}</div><div style="font-size: 12px; color: #666;">Failed</div></div>
-            </div>
-
-            <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
-                <thead>
-                    <tr style="background: #f3f4f6;">
-                        <th style="text-align: left; padding: 10px;">Test Case</th>
-                        <th style="text-align: left; padding: 10px;">Status</th>
-                        <th style="text-align: left; padding: 10px;">Duration</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows}
-                </tbody>
-            </table>
-
-            <p style="margin-top: 30px; font-size: 12px; color: #999; text-align: center;">
-                This is an aggregated report to reduce email frequency.
-            </p>
-        </div>
+    story_section = f"""
+    <div style="background-color: #f7fafc; border-left: 4px solid #4a5568; padding: 16px; margin-bottom: 24px; border-radius: 0 4px 4px 0;">
+        <div style="font-size: 12px; font-weight: bold; color: #4a5568; text-transform: uppercase; margin-bottom: 4px;">Verified User Story</div>
+        <div style="color: #2d3748; font-style: italic; line-height: 1.5;">"{user_story}"</div>
     </div>
+    """ if user_story else ""
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #2d3748; margin: 0; padding: 0; }}
+        </style>
+    </head>
+    <body style="background-color: #f4f7f9; padding: 20px;">
+        <div style="max-width: 650px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+            <!-- Header -->
+            <div style="background: linear-gradient(135deg, #1a202c 0%, #2d3748 100%); padding: 32px 24px; text-align: center;">
+                <h1 style="color: #ffffff; margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.025em;">QAi Mission Control</h1>
+                <p style="color: #a0aec0; margin: 8px 0 0 0; font-size: 14px;">{title}</p>
+            </div>
+            
+            <div style="padding: 32px 24px;">
+                {story_section}
+                {metadata_bar}
+                
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px; text-align: center;">
+                    <div style="background-color: #f8fafc; padding: 16px; border-radius: 8px; border: 1px solid #edf2f7;">
+                        <div style="font-size: 24px; font-weight: 800; color: #2d3748;">{total}</div>
+                        <div style="font-size: 11px; font-weight: bold; color: #718096; text-transform: uppercase;">Total Steps</div>
+                    </div>
+                    <div style="background-color: #f0fff4; padding: 16px; border-radius: 8px; border: 1px solid #c6f6d5;">
+                        <div style="font-size: 24px; font-weight: 800; color: #38a169;">{passed}</div>
+                        <div style="font-size: 11px; font-weight: bold; color: #38a169; text-transform: uppercase;">Passed</div>
+                    </div>
+                    <div style="background-color: #fff5f5; padding: 16px; border-radius: 8px; border: 1px solid #fed7d7;">
+                        <div style="font-size: 24px; font-weight: 800; color: #e53e3e;">{failed}</div>
+                        <div style="font-size: 11px; font-weight: bold; color: #e53e3e; text-transform: uppercase;">Failed</div>
+                    </div>
+                </div>
+
+                <div style="margin-bottom: 24px;">
+                    <h3 style="font-size: 16px; font-weight: 700; color: #2d3748; margin: 0 0 16px 0; padding-bottom: 8px; border-bottom: 2px solid #edf2f7;">
+                        Test Execution Details
+                    </h3>
+                    <table style="width: 100%; border-collapse: collapse;">
+                        <thead>
+                            <tr style="text-align: left; font-size: 11px; font-weight: 700; color: #a0aec0; text-transform: uppercase; background-color: #f8fafc;">
+                                <th style="padding: 12px;">Step & Methodology</th>
+                                <th style="padding: 12px; text-align: center;">Status</th>
+                                <th style="padding: 12px; text-align: right;">Latency</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Footer -->
+                <div style="margin-top: 40px; padding-top: 24px; border-top: 1px solid #edf2f7; text-align: center;">
+                    <p style="font-size: 14px; color: #4a5568; margin-bottom: 8px;">
+                        The mission resulted in a <strong>{int(passed/total*100) if total > 0 else 0}%</strong> success rate.
+                    </p>
+                    <p style="font-size: 12px; color: #a0aec0;">
+                        Batch ID: {batch_id} <br>
+                        Sent via QAi Autonomous Engine • {runs.first().executed_at.strftime('%Y-%m-%d %H:%M:%S UTC')}
+                    </p>
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
     """
 
     try:

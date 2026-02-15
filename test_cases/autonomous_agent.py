@@ -11,28 +11,33 @@ class AutonomousAgent:
     A Self-Driving QA Agent that executes API tests live, reacts to errors,
     and maintains state like a human tester.
     """
-    def __init__(self, collection, user_story=None, env_vars=None):
+    def __init__(self, collection, user_story=None, env_vars=None, scenarios=None, categories=None, layer="backend", runner_types=None):
         self.collection = collection
         self.user_story = user_story or "Explore the API and ensure core functionality works."
         self.env_vars = env_vars or {}
         
+        # Mission Context (Determines the agent's focus)
+        self.scenarios = scenarios or "HAPPY_PATH"
+        self.categories = categories or ["functional"]
+        self.layer = layer
+        self.runner_types = runner_types or ["http"]
+        
         # LLM Config
-        self.provider = getattr(settings, 'LLM_PROVIDER', 'gemini').lower() # Default to Gemini
+        # ...
+        self.provider = getattr(settings, 'LLM_PROVIDER', 'gemini').lower() 
         self.openai_api_key = getattr(settings, 'LLM_API_KEY', None)
         self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)
         
-        # Intelligent Model Selection (2026 Fleet)
         if self.provider == "gemini":
             self.model = getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash')
         else:
             self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
 
-        # Agent Memory (The "Brain")
+        # Agent Memory
         self.session = requests.Session() 
         self.history = [] 
         self.extracted_vars = {} 
         
-        # Hydrate memory with Env Vars
         if self.env_vars:
             self.extracted_vars.update(self.env_vars)
 
@@ -137,6 +142,7 @@ class AutonomousAgent:
                     steps_log.append({
                         "step": step_i,
                         "action": "CALL_API",
+                        "reason": action.get("reason"), # Capture WHY the agent did this
                         "endpoint": target.get('name', 'Unnamed'),
                         "method": target['method'],
                         "url": target['url'],
@@ -289,23 +295,33 @@ class AutonomousAgent:
         return steps_log
 
     def _build_system_prompt(self, endpoints):
+        # Tools are enabled based on runner_types
+        has_http = "http" in self.runner_types
+        has_browser = "browser" in self.runner_types
+        has_load = "load" in self.runner_types
+
         return f"""
 You are an Universal Autonomous QA Agent. You have the "Vibe" of a senior human tester.
 Your goal is to verify the User Story: "{self.user_story}"
 
-PROJECT VARS: {json.dumps(self.env_vars)}
+MISSION PROFILE:
+- CATEGORIES: {", ".join(self.categories)}
+- TARGET LAYER: {self.layer}
+- MISSION SCENARIOS: {self.scenarios} (Focus your thinking on these types of tests)
+
+PROJECT VARS (Auth tokens, Base URLs): {json.dumps(self.env_vars)}
 
 AVAILABLE API ENDPOINTS:
 {json.dumps(endpoints, indent=2)}
 
 YOUR TOOLSET:
-1. CALL_API: Use this for functional backend testing and state preparation.
-2. BROWSER_ACTION: Use this to test the UI/UX. You have "EYES" – after every browser action, you will receive a visual description of what the page actually looks like. Use this to verify buttons, error messages, and layouts.
-3. STRESS_TEST: Use this if the user wants to test performance.
+{"1. CALL_API: Use this for functional backend testing." if has_http else ""}
+{"2. BROWSER_ACTION: Use this to test the UI/UX via Playwright. You have visual capabilities." if has_browser else ""}
+{"3. STRESS_TEST: Use this if the user wants to test performance." if has_load else ""}
 
 INSTRUCTIONS:
-1. UNDERSTUDY: Look at the whole collection map before your first move.
-2. STRATEGIZE: If the story is about "User Experience", start with BROWSER_ACTION.
+1. FOCUS: Your primary mission objective is to cover the scenarios: {self.scenarios}.
+2. STRATEGIZE: If SECURITY is a scenario, look for broken auth or injection points. If EDGE_CASE, try weird values.
 3. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY. 
    - If the server says "FirstName is required", look at your casing! (e.g. maybe it wants 'FirstName' instead of 'firstName').
    - Use the exact keys the server's error message suggests.

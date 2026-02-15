@@ -187,7 +187,15 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     if hasattr(collection.project, 'environment_variables') and collection.project.environment_variables:
         project_vars = collection.project.environment_variables
         
-    agent = AutonomousAgent(collection, user_story=final_story, env_vars=project_vars)
+    agent = AutonomousAgent(
+        collection, 
+        user_story=final_story, 
+        env_vars=project_vars,
+        scenarios=scenarios,
+        categories=categories,
+        layer=layer,
+        runner_types=runner_types
+    )
     
     # 3. Run The Mission (Blocking Call - The Agent thinks and acts)
     try:
@@ -206,10 +214,12 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
                 # Create a "Record" of what the agent did
                 test_case = TestCase.objects.create(
                     endpoint=endpoint, # Can be null if agent invented a path
-                    name=f"Agent Step {step['step']}: {step['endpoint']}",
-                    description=f"Auto-executed by agent. Status: {step['status']}",
+                    name=f"Step {step['step']}: {step['endpoint']}",
+                    description=f"Action: {step['reason']}", # Store the thinking here!
                     runner_type="http",
-                    category="functional", 
+                    category=categories[0] if isinstance(categories, list) and categories else "functional", 
+                    layer=layer,
+                    tags=[f"SCENARIO:{s}" for s in scenarios.split(',')] if isinstance(scenarios, str) else [f"SCENARIO:{scenarios}"],
                     ai_generated=True,
                     user_story=final_story,
                     assertions=[{"type": "status", "value": step['response']['status']}] # Implicit assertion
@@ -223,7 +233,7 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
                     response_status=step['response']['status'],
                     response_body=step['response']['body'],
                     response_time_ms=step['response']['duration_ms'],
-                    logs=f"REQUEST:\n{json.dumps(step['request'], indent=2)}\n\nRESPONSE:\n{step['response']['body']}",
+                    logs=f"AI THOUGHT: {step['reason']}\n\nREQUEST:\n{json.dumps(step['request'], indent=2)}\n\nRESPONSE:\n{step['response']['body']}",
                     triggered_by="ai_agent"
                 )
     except Exception as e:
