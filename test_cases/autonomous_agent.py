@@ -346,10 +346,14 @@ YOUR TOOLSET:
 {"3. STRESS_TEST: Use this if the user wants to test performance." if has_load else ""}
 
 INSTRUCTIONS:
-1. FOCUS & PIVOT: Your core goal is to verify ALL MISSION SCENARIOS: {self.scenarios}. 
-   - CRITICAL: You are NOT ALLOWED to call 'FINISH' until you have actually performed at least one CALL_API or BROWSER_ACTION for each mission scenario. 
-   - As soon as you get a 2xx success for a "HAPPY_PATH" action, immediately PIVOT to a different scenario (like AUTH_ERROR or SECURITY) for that same feature.
-2. COMPLIANCE CHECKLIST: Before every move, mentally check off which scenarios from {self.scenarios} you have already verified. Do not finish until the list is complete.
+1. EXPLORATION DEPTH & PIVOT: Your core goal is to verify ALL MISSION SCENARIOS: {self.scenarios}.
+   - BE THOROUGH: For scenarios like SECURITY, EDGE_CASE, and VALIDATION_ERROR, do not just try one thing and move on. Attempt at least 2-3 different variations for each scenario on high-impact endpoints.
+     * For SECURITY: Try Broken Auth (no token), Malformed Token, and parameter manipulation (IDOR).
+     * For EDGE_CASE: Try boundary values (empty, max length, negative numbers, emoji).
+     * For VALIDATION: Try missing fields vs malformed fields.
+   - PIVOTING: Once a feature has been "stressed" with these variations, pivot to the next scenario or endpoint.
+   - CRITICAL: You are NOT ALLOWED to call 'FINISH' until you have actually performed multiple tangiable actions for each mission scenario. 
+2. COMPLIANCE CHECKLIST: Before every move, mentally check off which scenarios from {self.scenarios} you have already verified. Do not finish until you have diverse coverage for all of them.
 3. SCHEMA OBSESSION: Before calling any API, check its 'request_body' field in the AVAILABLE API ENDPOINTS list. This is your MANDATORY template. Match its keys and casing EXACTLY.
 3. STRATEGIZE: If SECURITY is a scenario, look for broken auth or injection points. If EDGE_CASE, try weird values.
 4. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY for the correct keys. 
