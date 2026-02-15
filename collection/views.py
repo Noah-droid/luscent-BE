@@ -215,7 +215,8 @@ class SwaggerImportView(APIView):
                     defaults={
                         "name": e["name"],
                         "description": e.get("description", ""),
-                        "request_body": e.get("requestBody") or {}
+                        "request_body": e.get("flattened_body") or {},
+                        "query_params": e.get("flattened_query") or {}
                     }
                 )
                 created_count += 1

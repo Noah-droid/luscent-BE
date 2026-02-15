@@ -109,6 +109,39 @@ def parse_paths_to_endpoints(spec: dict, project_obj=None, default_base_url=None
                 if effective_base and not effective_base.endswith("/"):
                     effective_base += "/"
 
+                # Improved Schema Extraction
+                request_body = {}
+                rb_obj = op_obj.get("requestBody")
+                if rb_obj and isinstance(rb_obj, dict):
+                    content = rb_obj.get("content", {})
+                    # Try to get the schema from the first available media type (usually application/json)
+                    for _, media_type in content.items():
+                        schema = media_type.get("schema", {})
+                        if schema:
+                            # If it's a ref, the AI will still see the ID, but we try to provide info
+                            request_body = schema.get("properties") or schema.get("example") or schema
+                            break
+                
+                # Fallback and Parameter Flattening (for Swagger 2 or Query Params)
+                flattened_query = {}
+                params = op_obj.get("parameters", [])
+                for p in params:
+                    if not isinstance(p, dict): continue
+                    
+                    p_name = p.get("name")
+                    p_in = p.get("in")
+                    
+                    if p_in == "body" and not request_body:
+                        # Swagger 2 Body
+                        schema = p.get("schema", {})
+                        request_body = schema.get("properties") or schema.get("example") or schema
+                    elif p_in == "formData":
+                        # Swagger 2 Form Data
+                        request_body[p_name] = p.get("type", "string")
+                    elif p_in == "query":
+                        # Collect query params for the brain too
+                        flattened_query[p_name] = p.get("type", "string")
+
                 endpoint = {
                     "method": m,
                     "path": raw_path,
@@ -116,7 +149,9 @@ def parse_paths_to_endpoints(spec: dict, project_obj=None, default_base_url=None
                     "name": op_obj.get("summary") or op_obj.get("operationId") or f"{m} {raw_path}",
                     "description": op_obj.get("description", ""),
                     "parameters": op_obj.get("parameters", []),
-                    "requestBody": op_obj.get("requestBody"),
+                    "requestBody": rb_obj, # keep raw for full context
+                    "flattened_body": request_body, # Helper for the AI
+                    "flattened_query": flattened_query,
                     "responses": op_obj.get("responses", {}),
                     "security": op_obj.get("security", spec.get("security", [])),
                 }
