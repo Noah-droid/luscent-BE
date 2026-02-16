@@ -1,76 +1,44 @@
-# QAi Backend
+# Luscent — AI-Powered QA Agent
 
-Django REST API for QAi testing platform.
+Luscent is an automated QA agent that tests web applications, detects regressions, and reports failures before they reach production.
 
-## Setup
+It simulates real user behavior, executes test flows, and generates actionable reports with logs and screenshots.
 
-```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+Built for fast-moving teams that ship frequently and need confidence in every release.
 
-# Install dependencies
-pip install -r requirements.txt
+---
 
-# Run migrations
-python manage.py migrate
+## Why Luscent exists
 
-# Create superuser
-python manage.py createsuperuser
+Modern teams ship fast. Manual QA slows releases and still misses critical issues.
 
-# Run development server
-python manage.py runserver
-```
+Luscent solves this by automatically:
 
-## Apps
+- Executing real user flows
+- Detecting UI and functional regressions
+- Capturing failures with screenshots and logs
+- Providing clear test reports
 
-- **users**: User authentication and API token management
-- **projects**: Project management (API specs, configurations)
-- **tests**: Test run, storage and results
+This reduces production bugs and increases release confidence.
 
-## API Endpoints
+---
 
-### Authentication
+## Core Features
 
-- `POST /api/auth/register` - Register new user
-- `POST /api/auth/login` - Login and get token
-- `GET /api/auth/me` - Get current user info
+- Automated browser testing using Playwright
+- User flow execution (login, navigation, actions)
+- Regression detection
+- Screenshot capture on failure
+- Structured test reports
+- Headless execution (CI/CD compatible)
+- CLI-based test runner
 
-### Projects
+Planned:
 
-- `GET /api/projects/` - List user's projects
-- `POST /api/projects/` - Create new project
-- `GET /api/projects/{id}/` - Get project details
-- `PUT /api/projects/{id}/` - Update project
-- `DELETE /api/projects/{id}/` - Delete project
+- AI-generated test scenarios
+- Self-healing selectors
+- CI/CD integrations
+- Dashboard UI
 
-### Test Runs
+---
 
-- `POST /api/projects/{id}/run-test/` - Submit test results
-- `GET /api/projects/{id}/results/` - Get test history
-- `GET /api/results/{id}/` - Get specific test run details
-
-## Environment Variables
-
-Create a `.env` file:
-
-```env
-DEBUG=True
-SECRET_KEY=your-secret-key-here
-DATABASE_URL=sqlite:///db.sqlite3
-ALLOWED_HOSTS=localhost,127.0.0.1
-CORS_ALLOWED_ORIGINS=http://localhost:3000
-```
-
-## Development
-
-```bash
-# Run tests
-python manage.py test
-
-# Create migrations
-python manage.py makemigrations
-
-# Apply migrations
-python manage.py migrate
-```
