@@ -23,12 +23,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-fvbs&)wu#p@kvohi-wpxk$p+*rl4myclq-lcp0&7pxga^w1xf$'
+SECRET_KEY = config('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = config('DEBUG', default=False, cast=bool)
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = [host.strip() for host in config('ALLOWED_HOSTS').split(',')]
 
 
 # Application definition
@@ -262,3 +262,7 @@ GITHUB_CLIENT_SECRET = config('GITHUB_CLIENT_SECRET', default='')
 
 QAI_RUNNER_URL= config('QAI_RUNNER_URL')
 QAI_RUNNER_SECRET=config('QAI_RUNNER_SECRET')
+
+E2B_API_KEY = config('E2B_API_KEY', default=None)
+# The default template for E2B sandboxes
+E2B_SANDBOX_TEMPLATE = config('E2B_SANDBOX_TEMPLATE', default='base')

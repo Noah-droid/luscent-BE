@@ -10,6 +10,11 @@ import tempfile
 import json
 from django.conf import settings
 
+try:
+    from e2b import Sandbox
+except ImportError:
+    Sandbox = None
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,10 @@ class RunnerService:
                 self._run_load_test(test_case, test_run, override_url=override_url)
             else:
                 raise ValueError(f"Unknown runner type: {runner_type}")
+            
+            # SESSION PERSISTENCE: If this run generated a new sandbox_id, 
+            # make it available to future runs in this batch if they don't have one
+            # (Handled inside _run_in_sandbox and _run_e2b)
                 
             test_run.save()
             
@@ -231,7 +240,7 @@ class RunnerService:
         sandbox_script = "\n".join(script_lines)
 
         # Run in Sandbox
-        result = self._run_in_sandbox(sandbox_script, timeout=40)
+        result = self._run_in_sandbox(sandbox_script, timeout=40, test_run=test_run)
         
         # Parse result and update models
         if "error" in result:
@@ -317,12 +326,31 @@ class RunnerService:
 
 
 
-    def _run_in_sandbox(self, script_content, env_vars=None, timeout=60, use_network=True):
+    def _run_in_sandbox(self, script_content, env_vars=None, timeout=60, use_network=True, test_run=None):
         """
         Executes a script inside a hardened sandbox.
         Automatically switches between Local Docker and Remote Cloud Run.
         """
-        # Check for Remote Runner (Production Mode)
+        # SESSION PERSISTENCE: Check if we are in a batch and there's an existing sandbox
+        existing_sandbox_id = None
+        if test_run and test_run.batch_id:
+            # Look for recent active sandboxes in this batch
+            # Note: We take the most recent one to ensure continuity
+            prev_run_with_sandbox = TestRun.objects.filter(
+                batch_id=test_run.batch_id, 
+                sandbox_id__isnull=False
+            ).exclude(id=test_run.id).order_by('-executed_at').first()
+            
+            if prev_run_with_sandbox:
+                existing_sandbox_id = prev_run_with_sandbox.sandbox_id
+                logger.info(f"[RunnerService] Reusing active sandbox {existing_sandbox_id} from previous run in batch")
+
+        # Check for E2B (Priority 1)
+        if Sandbox and getattr(settings, 'E2B_API_KEY', None):
+            logger.info("[RunnerService] Using E2B sandbox...")
+            return self._run_e2b(script_content, env_vars, timeout, test_run=test_run, sandbox_id=existing_sandbox_id)
+
+        # Check for Remote Runner (Production Mode - GCP fallback)
         remote_url = getattr(settings, 'QAI_RUNNER_URL', None)
         if remote_url:
             logger.info(f"[RunnerService] Using REMOTE runner at: {remote_url}")
@@ -450,6 +478,92 @@ class RunnerService:
             logger.error(f"[RemoteRunner] {error_msg}")
             return {"error": error_msg, "returncode": -1}
 
+    def _run_e2b(self, script_content, env_vars=None, timeout=60, test_run=None, sandbox_id=None):
+        """
+        Executes a script inside an E2B Sandbox.
+        Supports session persistence if sandbox_id is provided.
+        """
+        api_key = getattr(settings, 'E2B_API_KEY', None)
+        template = getattr(settings, 'E2B_SANDBOX_TEMPLATE', 'base')
+        
+        if not api_key:
+            return {"error": "E2B_API_KEY not configured", "returncode": -1}
+            
+        start_time = time.time()
+        
+        try:
+            # Attach to existing or create new sandbox
+            if sandbox_id:
+                logger.info(f"[E2B] Attaching to existing sandbox: {sandbox_id}")
+                try:
+                    sb = Sandbox.connect(sandbox_id, api_key=api_key)
+                except Exception as e:
+                    logger.warning(f"[E2B] Could not connect to sandbox {sandbox_id}, creating new one. Error: {e}")
+                    sb = Sandbox(template=template, api_key=api_key)
+            else:
+                logger.info(f"[E2B] Creating new sandbox with template: {template}")
+                sb = Sandbox(template=template, api_key=api_key)
+
+            # Update test_run with the sandbox_id so future tests in batch can find it
+            if test_run:
+                test_run.sandbox_id = sb.sandbox_id
+                test_run.save()
+
+            try:
+                #  Prepare environment and Run
+                # Use a specific filename per run to avoid collisions if multiple scripts are sent
+                filename = f"run_{int(time.time())}.py"
+                sb.files.write(f"/home/user/{filename}", script_content)
+                
+                full_env = env_vars or {}
+                cmd_result = sb.commands.run(
+                    f"python3 /home/user/{filename}",
+                    envs=full_env,
+                    timeout=timeout
+                )
+                
+                duration = int((time.time() - start_time) * 1000)
+                
+                # Handle Artifacts
+                screenshot_path = full_env.get("SCREENSHOT_PATH")
+                temp_dir = None
+                
+                if screenshot_path:
+                    try:
+                        file_content = sb.files.read(screenshot_path, format="buffer")
+                        temp_dir = tempfile.mkdtemp()
+                        local_screenshot = os.path.join(temp_dir, "screenshot.png")
+                        with open(local_screenshot, "wb") as f:
+                            f.write(file_content)
+                        logger.info(f"[E2B] Artifact downloaded from {sb.sandbox_id}: {screenshot_path}")
+                    except Exception as e:
+                        logger.warning(f"[E2B] Could not download screenshot: {e}")
+
+                return {
+                    "stdout": cmd_result.stdout,
+                    "stderr": cmd_result.stderr,
+                    "returncode": cmd_result.exit_code,
+                    "duration": duration,
+                    "temp_dir": temp_dir
+                }
+
+            finally:
+                # Keep Alive
+                keep_alive = False
+                if test_run:
+                    if test_run.batch_id or test_run.test_case.keep_alive:
+                        keep_alive = True
+                
+                if not keep_alive:
+                    logger.info(f"[E2B] Closing sandbox {sb.sandbox_id}")
+                    sb.close()
+                else:
+                    logger.info(f"[E2B] Keeping sandbox {sb.sandbox_id} alive for batch continuity")
+
+        except Exception as e:
+            logger.error(f"[E2B] Sandbox operation failed: {str(e)}")
+            return {"error": str(e), "returncode": -1, "duration": 0}
+
     def _run_on_host(self, script_content, env_vars=None, timeout=60):
         """Standard subprocess execution (Original logic)"""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp:
@@ -492,8 +606,9 @@ class RunnerService:
         # Run in sandbox
         result = self._run_in_sandbox(
             script_content,
-            env_vars={"SCREENSHOT_PATH": "/app/screenshot.png"},
-            timeout=60
+            env_vars={"SCREENSHOT_PATH": "/home/user/screenshot.png"}, # E2B home
+            timeout=60,
+            test_run=test_run
         )
 
         test_run.logs = f"STDOUT:\n{result.get('stdout', '')}\n\nSTDERR:\n{result.get('stderr', '')}"
@@ -636,7 +751,7 @@ print(res.stderr, file=sys.stderr)
 sys.exit(res.returncode)
 """.strip()
 
-        result = self._run_in_sandbox(wrapper_script, timeout=30)
+        result = self._run_in_sandbox(wrapper_script, timeout=30, test_run=test_run)
         
         test_run.logs = f"STDOUT:\n{result.get('stdout', '')}\n\nSTDERR:\n{result.get('stderr', '')}"
         test_run.response_time_ms = result.get("duration", 0)

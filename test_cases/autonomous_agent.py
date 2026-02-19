@@ -1,8 +1,13 @@
-import requests
-import json
 import logging
 import time
+import requests
+import re
 from django.conf import settings
+
+try:
+    from e2b import Sandbox
+except ImportError:
+    Sandbox = None
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +28,11 @@ class AutonomousAgent:
         self.runner_types = runner_types or ["http"]
         
         # LLM Config
-        # ...
         self.provider = getattr(settings, 'LLM_PROVIDER', 'gemini').lower() 
         self.openai_api_key = getattr(settings, 'LLM_API_KEY', None)
         self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)
+        self.e2b_api_key = getattr(settings, 'E2B_API_KEY', None)
+        self.sandbox_template = getattr(settings, 'E2B_SANDBOX_TEMPLATE', 'qai-runner')
         
         if self.provider == "gemini":
             self.model = getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash')
@@ -34,9 +40,11 @@ class AutonomousAgent:
             self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
 
         # Agent Memory
-        self.session = requests.Session() 
         self.history = [] 
         self.extracted_vars = {} 
+        self.sandbox = None # Initialized during mission
+        self.mail_session = None # Mail.tm session
+        self.current_email = None
         
         if self.env_vars:
             self.extracted_vars.update(self.env_vars)
@@ -65,184 +73,203 @@ class AutonomousAgent:
         endpoint_map = {str(e['id']): e for e in endpoints_raw}
         
         logger.info(f"[Agent] Discovery complete. Map size: {len(endpoints)} endpoints.")
-        for e in endpoints:
-            logger.info(f"  - {e['method']} {e['url']} ({e['name']})")
+        
+        # 2. START SANDBOX (The Body)
+        if not Sandbox or not self.e2b_api_key:
+            logger.error("[Agent] E2B not configured. Switching to HOST-ONLY mode (Unsafe/Limited).")
+        else:
+            try:
+                logger.info(f"[Agent] Spawning sandbox environment: {self.sandbox_template}")
+                self.sandbox = Sandbox(template=self.sandbox_template, api_key=self.e2b_api_key)
+            except Exception as e:
+                logger.error(f"[Agent] Failed to spawn sandbox: {e}")
 
         system_prompt = self._build_system_prompt(endpoints)
         self.history.append({"role": "system", "content": system_prompt})
         
         steps_log = []
-        
-        # 2. The Loop
         correction_count = 0
-        for step_i in range(1, max_steps + 1):
-            logger.info(f"--- [Step {step_i}/{max_steps}] Thinking ---")
-            
-            action = self._get_next_action()
-            
-            # Log the Agent's Decision for visibility
-            reason = action.get('reason', 'No reason provided')
-            action_type = action.get('type', 'UNKNOWN')
-            logger.info(f"[Agent Decision] Type: {action_type} | Reason: {reason}")
-            
-            if action.get("type") == "FINISH":
-                logger.info(f"[Agent] Mission Complete: {action.get('reason')}")
-                steps_log.append({
-                    "step": step_i,
-                    "action": "FINISH",
-                    "reason": action.get("reason"),
-                    "self_correction_count": correction_count,
-                    "status": "success"
-                })
-                break
+
+        try:
+            # 3. The Loop
+            for step_i in range(1, max_steps + 1):
+                logger.info(f"--- [Step {step_i}/{max_steps}] Thinking ---")
                 
-            if action.get("type") == "ERROR":
-                correction_count += 1
-                logger.error(f"[Agent] Brain Error: {action.get('reason')}")
-                self._record_observation(f"Error from Brain: {action.get('reason')}. Retrying.")
-                continue
-
-            if action.get("type") == "BROWSER_ACTION":
-                result = self._execute_browser_action(action)
-                steps_log.append({
-                    "step": step_i, "action": "BROWSER_ACTION",
-                    "details": action, "response": result,
-                    "status": "passed" if not result.get("error") else "failed"
-                })
-                self._record_observation(f"Browser Result: {json.dumps(result)}")
-                continue
-
-            if action.get("type") == "STRESS_TEST":
-                result = self._execute_stress_test(action, endpoint_map)
-                steps_log.append({
-                    "step": step_i, "action": "STRESS_TEST",
-                    "details": action, "response": result,
-                    "status": "passed" if not result.get("error") else "failed"
-                })
-                self._record_observation(f"Stress Test Result: {json.dumps(result)}")
-                continue
-
-            if action.get("type") == "CALL_API":
-                endpoint_id = action.get("endpoint_id")
-                target = endpoint_map.get(endpoint_id)
+                action = self._get_next_action()
+                reason = action.get('reason', 'No reason provided')
+                action_type = action.get('type', 'UNKNOWN')
+                logger.info(f"[Agent Decision] Type: {action_type} | Reason: {reason}")
                 
-                # Resilient Fallback: If AI sent a URL/Path instead of an ID, try to find it
-                if not target:
-                    logger.warning(f"[Agent] ID {endpoint_id} not found. Trying URL fallback.")
-                    for e_id, e_val in endpoint_map.items():
-                        if e_val['url'] == endpoint_id or (endpoint_id and endpoint_id in e_val['url']):
-                            target = e_val
-                            break
-                            
-                if not target:
-                    self._record_observation(f"Error: Endpoint ID '{endpoint_id}' not found in the mission map. Please use the exact 'id' field from the list.")
+                if action.get("type") == "FINISH":
+                    logger.info(f"[Agent] Mission Complete: {action.get('reason')}")
+                    steps_log.append({
+                        "step": step_i, "action": "FINISH", "reason": action.get("reason"),
+                        "self_correction_count": correction_count, "status": "success"
+                    })
+                    break
+                    
+                if action.get("type") == "ERROR":
+                    correction_count += 1
+                    self._record_observation(f"Error from Brain: {action.get('reason')}. Retrying.")
                     continue
 
-                logger.info(f"[Agent] Executing {target['method']} {target['url']}")
-                req_data = self._prepare_request(action.get("payload", {}))
-                
-                try:
-                    start_time = time.time()
-                    resolved_url = self._resolve_url(target['url'], action.get("payload", {}).get("params", {}))
-                    response = self.session.request(
-                        method=target['method'],
-                        url=resolved_url,
-                        headers=req_data.get("headers", {}),
-                        json=req_data.get("body") if target['method'] in ['POST', 'PUT', 'PATCH'] else None,
-                        params=req_data.get("params"),
-                        timeout=30
-                    )
-                    duration = round((time.time() - start_time) * 1000, 2)
-                    
-                    result_summary = {
-                        "status": response.status_code,
-                        "reason": response.reason,
-                        "body": self._truncate_body(response.text),
-                        "duration_ms": duration
-                    }
-                    
-                    is_passed = 200 <= response.status_code < 300
-                    if not is_passed:
-                        correction_count += 1 # Tracking the self-correction effort
-                    
-                    steps_log.append({
-                        "step": step_i,
-                        "action": "CALL_API",
-                        "reason": action.get("reason"), # Capture WHY the agent did this
-                        "endpoint": target.get('name', 'Unnamed'),
-                        "method": target['method'],
-                        "url": target['url'],
-                        "request": req_data,
-                        "response": result_summary,
-                        "status": "passed" if is_passed else "failed"
-                    })
-                    
-                    observation = f"API Response: {response.status_code} {response.reason}\nBody: {result_summary['body']}"
-                    self._record_observation(observation)
-                    
-                except Exception as e:
+                # DISPATCH TO SANDBOX
+                result = None
+                if action_type == "CALL_API":
+                    result = self._execute_api_call(action, endpoint_map)
+                elif action_type == "BROWSER_ACTION":
+                    result = self._execute_browser_action(action)
+                elif action_type == "STRESS_TEST":
+                    result = self._execute_stress_test(action, endpoint_map)
+                elif action_type == "SHELL_COMMAND":
+                    result = self._execute_shell_command(action)
+                elif action_type == "MAIL_ACTION":
+                    result = self._execute_mail_action(action)
+                else:
+                    result = {"error": f"Unknown action type: {action_type}"}
+
+                status = "passed" if not result.get("error") and result.get("status") not in ["error", "failed"] else "failed"
+                if status == "failed":
                     correction_count += 1
-                    logger.error(f"[Agent] Step failed: {e}")
-                    self._record_observation(f"System Error: {str(e)}")
-                    steps_log.append({
-                        "step": step_i, "action": "ERROR", "error": str(e), "status": "error"
-                    })
+
+                steps_log.append({
+                    "step": step_i, "action": action_type,
+                    "details": action, "response": result,
+                    "status": status
+                })
+                
+                # Feedback loop
+                self._record_observation(f"Result for {action_type}: {json.dumps(result)}")
+
+        finally:
+            if self.sandbox:
+                logger.info(f"[Agent] Closing sandbox: {self.sandbox.sandbox_id}")
+                self.sandbox.close()
 
         return steps_log
 
-    def _execute_browser_action(self, action):
-        """Simulates a browser interaction using Playwright and captures visual data."""
-        from playwright.sync_api import sync_playwright
-        import os
-        import base64
-        import tempfile
+    def _execute_api_call(self, action, endpoint_map):
+        """Runs an API request script inside the sandbox for state persistence."""
+        endpoint_id = action.get("endpoint_id")
+        target = endpoint_map.get(str(endpoint_id))
+        
+        if not target:
+            return {"error": f"Endpoint ID '{endpoint_id}' not found."}
 
-        logger.info(f"[Agent] Browser Action: {action.get('action')} on {action.get('url') or action.get('selector')}")
+        resolved_url = self._resolve_url(target['url'], action.get("payload", {}).get("params", {}))
+        req_data = self._prepare_request(action.get("payload", {}))
+        
+        # We generate a small python script to run in the sandbox
+        # This ensures cookies/headers stay in the sandbox if we used a browser before
+        script = f"""
+import requests
+import json
+import time
+
+try:
+    resp = requests.request(
+        method='{target['method']}',
+        url='{resolved_url}',
+        headers={json.dumps(req_data.get("headers", {}))},
+        json={json.dumps(req_data.get("body"))} if '{target['method']}' in ['POST', 'PUT', 'PATCH'] else None,
+        params={json.dumps(req_data.get("params"))},
+        timeout=30
+    )
+    print(json.dumps({{
+        "status": resp.status_code,
+        "reason": resp.reason,
+        "body": resp.text[:1000],
+    }}))
+except Exception as e:
+    print(json.dumps({{"error": str(e)}}))
+"""
+        return self._run_in_sandbox_or_host(script)
+
+    def _execute_shell_command(self, action):
+        """Executes arbitrary CLI commands (New for E2B)."""
+        cmd = action.get("command")
+        if not self.sandbox:
+            return {"error": "Sandbox not available for shell commands."}
+        
+        logger.info(f"[Agent] Executing Shell: {cmd}")
+        try:
+            res = self.sandbox.commands.run(cmd, timeout=30)
+            return {
+                "stdout": res.stdout,
+                "stderr": res.stderr,
+                "exit_code": res.exit_code
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _run_in_sandbox_or_host(self, script):
+        """Helper to run a python snippet in the sandbox or fallback to local."""
+        if self.sandbox:
+            self.sandbox.files.write("/home/user/agent_temp.py", script)
+            res = self.sandbox.commands.run("python3 /home/user/agent_temp.py")
+            try:
+                return json.loads(res.stdout)
+            except:
+                return {"stdout": res.stdout, "stderr": res.stderr, "error": "Invalid JSON output from script"}
+        else:
+            # Fallback (Original method)
+            import execjs # or similar, but let's just stick to the sandbox-first approach
+            return {"error": "Native execution failed. Sandbox required."}
+
+    def _execute_browser_action(self, action):
+        """Executes a Playwright script inside the E2B Sandbox."""
+        if not self.sandbox:
+            return {"error": "Sandbox not available for browser actions."}
+
+        logger.info(f"[Agent] E2B Browser Action: {action.get('action')} on {action.get('url') or action.get('selector')}")
+        
+        # We write a standalone script to the sandbox that uses its local Playwright
+        script = f"""
+from playwright.sync_api import sync_playwright
+import json
+import base64
+
+def run():
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
         
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                
-                # Execution
-                if action.get("action") == "navigate":
-                    page.goto(action.get("url"))
-                elif action.get("action") == "click":
-                    page.click(action.get("selector"))
-                elif action.get("action") == "type":
-                    page.fill(action.get("selector"), action.get("value"))
-                
-                # Post-action Wait
-                page.wait_for_timeout(2000) 
-
-                # THE VISUAL FEED (Taking the Screenshot)
-                screenshot_path = os.path.join(tempfile.gettempdir(), f"agent_sc_{int(time.time())}.png")
-                page.screenshot(path=screenshot_path)
-                
-                # Analyze with Vision
-                with open(screenshot_path, "rb") as f:
-                    b64_image = base64.b64encode(f.read()).decode('utf-8')
-                
-                visual_summary = self._analyze_vision(b64_image)
-                
-                # Metadata
-                title = page.title()
-                content_preview = page.content()[:500]
-                
-                browser.close()
-                
-                # Cleanup
-                if os.path.exists(screenshot_path):
-                    os.remove(screenshot_path)
-
-                return {
-                    "status": "success", 
-                    "title": title, 
-                    "visual_observation": visual_summary,
-                    "html_preview": content_preview
-                }
+            # Action
+            action_type = '{action.get("action")}'
+            if action_type == 'navigate':
+                page.goto('{action.get("url")}')
+            elif action_type == 'click':
+                page.click('{action.get("selector")}')
+            elif action_type == 'type':
+                page.fill('{action.get("selector")}', '{action.get("value")}')
+            
+            page.wait_for_timeout(2000)
+            
+            # Capture
+            screenshot = base64.b64encode(page.screenshot()).decode('utf-8')
+            
+            print(json.dumps({{
+                "status": "success",
+                "title": page.title(),
+                "screenshot_b64": screenshot,
+                "html_preview": page.content()[:500]
+            }}))
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            print(json.dumps({{"error": str(e)}}))
+        finally:
+            browser.close()
+
+run()
+"""
+        res = self._run_in_sandbox_or_host(script)
+        
+        # Post-process: Analyze with Vision if we got a screenshot
+        if res.get("screenshot_b64"):
+            res["visual_observation"] = self._analyze_vision(res["screenshot_b64"])
+            del res["screenshot_b64"] # Clean up the memory
+            
+        return res
 
     def _analyze_vision(self, b64_image):
         """Uses the Vision LLM to 'see' the screenshot."""
@@ -287,38 +314,83 @@ class AutonomousAgent:
             return "Vision system unavailable, relying on HTML observation."
 
     def _execute_stress_test(self, action, endpoint_map):
-        """Executes a simple high-concurrency stress test."""
-        import concurrent.futures
-        
+        """Executes a Locust load test inside the E2B Sandbox."""
+        if not self.sandbox:
+            return {"error": "Sandbox not available for stress tests."}
+            
         target_ids = action.get("endpoints_to_hit", [])
         users = action.get("users", 10)
         
-        logger.info(f"[Agent] Stress Test: Hitting {len(target_ids)} endpoints with {users} users.")
+        # We can dynamically pass the data to the pre-installed locustfile
+        logger.info(f"[Agent] E2B Stress Test requested for {len(target_ids)} endpoints.")
         
-        def hit_endpoint(endpoint_id):
-            target = endpoint_map.get(str(endpoint_id))
-            if not target: return None
-            try:
-                resp = requests.request(target['method'], self._resolve_url(target['url']), timeout=10)
-                return resp.status_code
-            except:
-                return 500
+        # For simplicity in this refactor, we just run a basic locust command
+        # A more advanced version would use the locustfile we copied into the template
+        cmd = f"locust -f /home/user/locustfile.py --headless -u {users} -r 2 -t 30s"
+        return self._execute_shell_command({"command": cmd})
 
-        results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            # Simple spread: each user hits all target endpoints once
-            futures = [executor.submit(hit_endpoint, eid) for _ in range(users) for eid in target_ids]
-            for future in concurrent.futures.as_completed(futures):
-                results.append(future.result())
+    def _execute_mail_action(self, action):
+        """Manages disposable email addresses using Mail.tm."""
+        mail_type = action.get("action") # 'create', 'get_messages', 'get_otp'
         
-        success_count = len([r for r in results if r and r < 400])
-        return {
-            "total_requests": len(results),
-            "success_rate": f"{(success_count/len(results))*100}%" if results else "0%",
-            "status": "success"
-        }
+        try:
+            # 1. Create a new address
+            if mail_type == "create":
+                # Get domain first
+                domain_resp = requests.get("https://api.mail.tm/domains").json()
+                domain = domain_resp['member'][0]['domain']
+                username = f"agent_{int(time.time())}"
+                password = "password123"
+                email = f"{username}@{domain}"
+                
+                resp = requests.post("https://api.mail.tm/accounts", json={
+                    "address": email,
+                    "password": password
+                })
+                if resp.status_code != 201:
+                    return {"error": f"Failed to create email: {resp.text}"}
+                
+                # Get Token
+                token_resp = requests.post("https://api.mail.tm/token", json={
+                    "address": email,
+                    "password": password
+                })
+                self.mail_session = token_resp.json()['token']
+                self.current_email = email
+                self.extracted_vars["AGENT_EMAIL"] = email
+                
+                return {"status": "success", "email": email, "reason": "New real disposable email created"}
 
-        return steps_log
+            # 2. Get Messages
+            if not self.mail_session:
+                return {"error": "No active mail session. Call 'create' first."}
+                
+            headers = {"Authorization": f"Bearer {self.mail_session}"}
+            msgs_resp = requests.get("https://api.mail.tm/messages", headers=headers).json()
+            
+            if not msgs_resp.get('member'):
+                return {"status": "waiting", "message": "No emails found yet."}
+
+            latest_msg = msgs_resp['member'][0]
+            
+            # 3. Get Full Content if needed
+            msg_detail = requests.get(f"https://api.mail.tm/messages/{latest_msg['id']}", headers=headers).json()
+            body = msg_detail.get('text') or msg_detail.get('html', "")
+            
+            # Simple OTP extraction helper
+            otp_match = re.search(r'\b\d{4,6}\b', body)
+            otp = otp_match.group(0) if otp_match else None
+
+            return {
+                "status": "success",
+                "subject": latest_msg.get('subject'),
+                "body": body[:500] + "...",
+                "extracted_otp": otp,
+                "created_at": latest_msg.get('createdAt')
+            }
+
+        except Exception as e:
+            return {"error": str(e)}
 
     def _build_system_prompt(self, endpoints):
         # Tools are enabled based on runner_types
@@ -341,9 +413,13 @@ AVAILABLE API ENDPOINTS:
 {json.dumps(endpoints, indent=2)}
 
 YOUR TOOLSET:
-{"1. CALL_API: Use this for functional backend testing. You MUST provide the 'endpoint_id' from the AVAILABLE API ENDPOINTS list above." if has_http else ""}
-{"2. BROWSER_ACTION: Use this to test the UI/UX via Playwright. You have visual capabilities." if has_browser else ""}
+{"1. CALL_API: Use this for functional backend testing. Runs inside the sandbox." if has_http else ""}
+{"2. BROWSER_ACTION: Use this to test the UI/UX via Playwright inside the sandbox." if has_browser else ""}
 {"3. STRESS_TEST: Use this if the user wants to test performance." if has_load else ""}
+4. SHELL_COMMAND: Use this to run any CLI commands, check files, or use Linux tools.
+5. MAIL_ACTION: Use this to handle OTPs and real email verification.
+   - Use 'create' to get a new address.
+   - Use 'get_messages' to check the inbox and find OTP codes.
 
 INSTRUCTIONS:
 1. EXPLORATION DEPTH & PIVOT: Your core goal is to verify ALL MISSION SCENARIOS: {self.scenarios}.
@@ -352,7 +428,12 @@ INSTRUCTIONS:
      * For EDGE_CASE: Try boundary values (empty, max length, negative numbers, emoji).
      * For VALIDATION: Try missing fields vs malformed fields.
    - PIVOTING: Once a feature has been "stressed" with these variations, pivot to the next scenario or endpoint.
-   - CRITICAL: You are NOT ALLOWED to call 'FINISH' until you have actually performed multiple tangiable actions for each mission scenario. 
+   - CRITICAL: You are NOT ALLOWED to call 'FINISH' until you have actually performed multiple tangiable actions for each mission scenario.
+   - OTP/VERIFICATION FLOW: If you initiate an action that sends an email (like signup or password reset), follow these steps:
+     1. Use MAIL_ACTION 'create' BEFORE the signup to get a real address.
+     2. Use the 'AGENT_EMAIL' variable from your memory in the API/Frontend signup.
+     3. Use MAIL_ACTION 'get_messages' to retrieve the OTP.
+     4. Proceed with the verification using the 'extracted_otp'.
 2. COMPLIANCE CHECKLIST: Before every move, mentally check off which scenarios from {self.scenarios} you have already verified. Do not finish until you have diverse coverage for all of them.
 3. SCHEMA OBSESSION: Before calling any API, check its 'request_body' field in the AVAILABLE API ENDPOINTS list. This is your MANDATORY template. Match its keys and casing EXACTLY.
 3. STRATEGIZE: If SECURITY is a scenario, look for broken auth or injection points. If EDGE_CASE, try weird values.
@@ -394,7 +475,21 @@ Type C: STRESS_TEST
   "reason": "The user wants to ensure the signup flow doesn't crash under pressure"
 }}
 
-Type D: FINISH
+Type D: SHELL_COMMAND
+{{
+  "type": "SHELL_COMMAND",
+  "command": "ls -la /app",
+  "reason": "I need to check if the build artifacts was generated successfully"
+}}
+
+Type E: MAIL_ACTION
+{{
+  "type": "MAIL_ACTION",
+  "action": "create",
+  "reason": "I need a real email to sign up"
+}}
+
+Type F: FINISH
 {{ "type": "FINISH", "reason": "Story fully verified." }}
 """
 
