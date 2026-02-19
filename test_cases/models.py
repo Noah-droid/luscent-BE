@@ -35,6 +35,9 @@ class TestCase(models.Model):
     # Toggle for Visual AI Check
     use_visual_ai = models.BooleanField(default=False, help_text="If true, takes screenshot and analyzes with AI")
 
+    # E2B Session Support
+    keep_alive = models.BooleanField(default=False, help_text="If true, the E2B sandbox will be kept alive for a period after execution")
+
     # Classification
     CATEGORY_CHOICES = [
         ("functional", "Functional"),
@@ -141,6 +144,9 @@ class TestRun(models.Model):
     
     # State Sharing: Data extracted from response to be shared with subsequent tests in the same batch
     extracted_data = models.JSONField(default=dict, blank=True, null=True, help_text="Variables extracted from this run for use in the batch")
+    
+    # E2B Session Persistence
+    sandbox_id = models.CharField(max_length=100, blank=True, null=True, help_text="E2B Sandbox ID for session persistence")
     
     # New: Hybrid/Self-Hosted Support
     # assigned_runner = models.ForeignKey(
