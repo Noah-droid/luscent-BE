@@ -6,6 +6,9 @@ import secrets
 class User(AbstractUser):
     """Custom user model"""
     email = models.EmailField(unique=True)
+    full_name = models.CharField(max_length=255, blank=True, null=True)
+    organization_name = models.CharField(max_length=255, blank=True, null=True)
+    onboarding_completed = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     

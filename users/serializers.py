@@ -8,8 +8,8 @@ class UserSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = User
-        fields = ['id', 'email', 'username', 'created_at', ]
-        read_only_fields = ['id', 'created_at',]
+        fields = ['id', 'email', 'username', 'full_name', 'organization_name', 'onboarding_completed', 'created_at']
+        read_only_fields = ['id', 'created_at']
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -34,6 +34,13 @@ class RegisterSerializer(serializers.ModelSerializer):
             password=validated_data['password']
         )
         return user
+
+
+class OnboardingSerializer(serializers.Serializer):
+    """Serializer for the onboarding step"""
+    full_name = serializers.CharField(max_length=255)
+    organization_name = serializers.CharField(max_length=255)
+
 
 
 class LoginSerializer(serializers.Serializer):
