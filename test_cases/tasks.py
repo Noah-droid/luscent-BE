@@ -170,7 +170,7 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     
     # REWRITTEN: AUTONOMOUS AGENT ENGINE (Vibe Coding)
     from .autonomous_agent import AutonomousAgent
-    from .models import TestCase, TestRun
+    from .models import TestCase, TestRun, AgentMission
     import json
     
     # If no story provided, use collection context or project context
@@ -181,6 +181,15 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     if not deduct_tokens(user, AGENT_SESSION_COST, f"Autonomous Agent Mission: {collection.name}"):
         logger.warning(f"Insufficient tokens for Agent Mission on {collection.name}")
         return
+
+    # 1.5 Create Agent Mission (For Live Tracking)
+    mission = AgentMission.objects.create(
+        user=user,
+        collection=collection,
+        user_story=final_story,
+        batch_id=batch_id,
+        status="pending"
+    )
 
     # 2. Initialize Agent
     project_vars = {}
@@ -194,7 +203,8 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
         scenarios=scenarios,
         categories=categories,
         layer=layer,
-        runner_types=runner_types
+        runner_types=runner_types,
+        mission_id=mission.id
     )
     
     # 3. Run The Mission (Blocking Call - The Agent thinks and acts)

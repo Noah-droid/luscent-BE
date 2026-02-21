@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import TestCase, TestRun
+from .models import TestCase, TestRun, AgentMission, AgentMissionStep, AgentPrompt
 
 class TestCaseSerializer(serializers.ModelSerializer):
     class Meta:
@@ -14,4 +14,23 @@ class TestRunSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = TestRun
+        fields = "__all__"
+
+class AgentMissionStepSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AgentMissionStep
+        fields = "__all__"
+
+class AgentPromptSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AgentPrompt
+        fields = "__all__"
+
+class AgentMissionSerializer(serializers.ModelSerializer):
+    steps = AgentMissionStepSerializer(many=True, read_only=True)
+    prompts = AgentPromptSerializer(many=True, read_only=True)
+    collection_name = serializers.ReadOnlyField(source='collection.name')
+
+    class Meta:
+        model = AgentMission
         fields = "__all__"

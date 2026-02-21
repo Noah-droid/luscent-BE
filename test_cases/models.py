@@ -162,3 +162,46 @@ class TestRun(models.Model):
         return f"Run {self.id} for {self.test_case.name} - {self.status}"
 
 
+
+class AgentMission(models.Model):
+    STATUS_CHOICES = [
+        ("running", "Running"),
+        ("completed", "Completed"),
+        ("error", "Error"),
+        ("paused", "Paused (Waiting for Input)"),
+    ]
+    
+    user = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name="agent_missions")
+    collection = models.ForeignKey('collection.Collection', on_delete=models.CASCADE, related_name="agent_missions")
+    user_story = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="running")
+    batch_id = models.UUIDField(db_index=True, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Mission {self.batch_id} - {self.status}"
+
+class AgentMissionStep(models.Model):
+    mission = models.ForeignKey(AgentMission, on_delete=models.CASCADE, related_name="steps")
+    step_number = models.IntegerField()
+    action_type = models.CharField(max_length=50) # CALL_API, BROWSER_ACTION, etc
+    thought = models.TextField(blank=True, null=True) # The "Reason" from AI
+    details = models.JSONField(default=dict, blank=True) # The action payload
+    response_body = models.TextField(blank=True, null=True) # The result from sandbox
+    response_status = models.IntegerField(null=True, blank=True)
+    status = models.CharField(max_length=20) # passed, failed
+    screenshot_url = models.URLField(max_length=500, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['step_number']
+
+class AgentPrompt(models.Model):
+    mission = models.ForeignKey(AgentMission, on_delete=models.CASCADE, related_name="prompts")
+    prompt = models.TextField()
+    is_processed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']

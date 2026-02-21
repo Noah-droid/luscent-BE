@@ -3,11 +3,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
 from django_ratelimit.decorators import ratelimit
 from collection.models import Endpoint
 from projects.models import Project
-from .models import TestCase, TestRun
-from .serializers import TestCaseSerializer, TestRunSerializer
+from .models import TestCase, TestRun, AgentMission, AgentMissionStep, AgentPrompt
+from .serializers import (
+    TestCaseSerializer, TestRunSerializer, 
+    AgentMissionSerializer, AgentMissionStepSerializer, AgentPromptSerializer
+)
 from .ai_generator import AITestGenerator
 from .runner_service import RunnerService
 from drf_yasg.utils import swagger_auto_schema
@@ -530,6 +534,7 @@ class ProjectStatusView(APIView):
         operation_description="Get project-wide test status summary",
         responses={200: "Health Summary JSON"}
     )
+    @method_decorator(cache_page(60 * 2)) # Cache for 2 mins
     def get(self, request, project_id):
         project = get_object_or_404(Project, id=project_id, user=request.user)
         
@@ -781,6 +786,7 @@ class CollectionStatusView(APIView):
         operation_description="Get collection-level test status summary",
         responses={200: "Collection Health Summary JSON"}
     )
+    @method_decorator(cache_page(60 * 1)) # Cache for 1 min
     def get(self, request, collection_id):
         from collection.models import Collection, Endpoint
         collection = get_object_or_404(Collection, id=collection_id, project__user=request.user)
@@ -866,3 +872,47 @@ class CollectionStatusView(APIView):
             },
             "endpoints": endpoint_status
         })
+
+class AgentMissionListView(generics.ListAPIView):
+    serializer_class = AgentMissionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    @method_decorator(cache_page(60 * 5)) # Cache for 5 mins
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        return AgentMission.objects.filter(user=self.request.user).order_by('-created_at')
+
+class AgentMissionDetailView(generics.RetrieveAPIView):
+    serializer_class = AgentMissionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        return AgentMission.objects.filter(user=self.request.user)
+
+    def get_object(self):
+        batch_id = self.kwargs.get("batch_id")
+        if batch_id:
+             return get_object_or_404(AgentMission, batch_id=batch_id, user=self.request.user)
+        return super().get_object()
+
+class AgentMissionPromptView(APIView):
+    """
+    Allows user to send a guidance prompt to a running mission.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, batch_id):
+        mission = get_object_or_404(AgentMission, batch_id=batch_id, user=request.user)
+        prompt_text = request.data.get("prompt")
+        
+        if not prompt_text:
+            return Response({"error": "Prompt required"}, status=400)
+            
+        prompt = AgentPrompt.objects.create(
+            mission=mission,
+            prompt=prompt_text
+        )
+        
+        return Response(AgentPromptSerializer(prompt).data, status=201)

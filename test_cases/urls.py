@@ -5,7 +5,8 @@ from .views import (
     TestRunListView, TestRunDetailView, DraftTestPlanView, BatchCreateTestsView,
     TestConfigView, RefineTestDraftView,
     TriggerTestRunView, ProjectStatusView, ProjectAutoPilotView,
-    CollectionAutoPilotView, CollectionStatusView
+    CollectionAutoPilotView, CollectionStatusView,
+    AgentMissionListView, AgentMissionDetailView, AgentMissionPromptView
 )
 
 urlpatterns = [
@@ -24,5 +25,10 @@ urlpatterns = [
     path("projects/<uuid:project_id>/auto-pilot/", ProjectAutoPilotView.as_view(), name="project-auto-pilot"),
     path("collections/<uuid:collection_id>/status/", CollectionStatusView.as_view(), name="collection-status"),
     path("collections/<uuid:collection_id>/auto-pilot/", CollectionAutoPilotView.as_view(), name="collection-auto-pilot"),
+    
+    # Agent Live Interaction
+    path("missions/", AgentMissionListView.as_view(), name="agent-mission-list"),
+    path("missions/<uuid:batch_id>/", AgentMissionDetailView.as_view(), name="agent-mission-detail"),
+    path("missions/<uuid:batch_id>/prompt/", AgentMissionPromptView.as_view(), name="agent-mission-prompt"),
 ]
 

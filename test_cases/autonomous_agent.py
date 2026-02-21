@@ -2,7 +2,9 @@ import logging
 import time
 import requests
 import re
+import json
 from django.conf import settings
+from .models import AgentMission, AgentMissionStep, AgentPrompt
 
 try:
     from e2b import Sandbox
@@ -16,8 +18,9 @@ class AutonomousAgent:
     A Self-Driving QA Agent that executes API tests live, reacts to errors,
     and maintains state like a human tester.
     """
-    def __init__(self, collection, user_story=None, env_vars=None, scenarios=None, categories=None, layer="backend", runner_types=None):
+    def __init__(self, collection, user_story=None, env_vars=None, scenarios=None, categories=None, layer="backend", runner_types=None, mission_id=None):
         self.collection = collection
+        self.mission_id = mission_id
         self.user_story = user_story or "Explore the API and ensure core functionality works."
         self.env_vars = env_vars or {}
         
@@ -56,6 +59,15 @@ class AutonomousAgent:
         """
         logger.info(f"[Agent] Starting mission for {self.collection.name}: {self.user_story}")
         
+        mission = None
+        if self.mission_id:
+            try:
+                mission = AgentMission.objects.get(id=self.mission_id)
+                mission.status = "running"
+                mission.save()
+            except AgentMission.DoesNotExist:
+                logger.warning(f"[Agent] Mission ID {self.mission_id} not found.")
+
         # 1. Understudy: Initialize Context
         # We now include the schema and ensure IDs are strings for the JSON prompt.
         endpoints_raw = list(self.collection.endpoints.values(
@@ -93,6 +105,15 @@ class AutonomousAgent:
         try:
             # 3. The Loop
             for step_i in range(1, max_steps + 1):
+                # 3a. Check for user prompts (Live Interaction)
+                if mission:
+                    new_prompts = AgentPrompt.objects.filter(mission=mission, is_processed=False).order_by('created_at')
+                    for p in new_prompts:
+                        logger.info(f"[Agent] Received User Guidance: {p.prompt}")
+                        self.history.append({"role": "user", "content": f"USER GUIDANCE / INSTRUCTION: {p.prompt}"})
+                        p.is_processed = True
+                        p.save()
+
                 logger.info(f"--- [Step {step_i}/{max_steps}] Thinking ---")
                 
                 action = self._get_next_action()
@@ -106,6 +127,17 @@ class AutonomousAgent:
                         "step": step_i, "action": "FINISH", "reason": action.get("reason"),
                         "self_correction_count": correction_count, "status": "success"
                     })
+                    if mission:
+                        mission.status = "completed"
+                        mission.save()
+                        
+                        AgentMissionStep.objects.create(
+                            mission=mission,
+                            step_number=step_i,
+                            action_type="FINISH",
+                            thought=action.get("reason"),
+                            status="passed"
+                        )
                     break
                     
                 if action.get("type") == "ERROR":
@@ -132,15 +164,38 @@ class AutonomousAgent:
                 if status == "failed":
                     correction_count += 1
 
-                steps_log.append({
+                step_data = {
                     "step": step_i, "action": action_type,
                     "details": action, "response": result,
                     "status": status
-                })
+                }
+                steps_log.append(step_data)
                 
+                # Live Recording
+                if mission:
+                    try:
+                        AgentMissionStep.objects.create(
+                            mission=mission,
+                            step_number=step_i,
+                            action_type=action_type,
+                            thought=reason,
+                            details=action,
+                            response_body=str(result.get("body", result.get("stdout", result.get("error", "")))),
+                            response_status=result.get("status") if isinstance(result.get("status"), int) else (result.get("exit_code") if isinstance(result.get("exit_code"), int) else None),
+                            status=status,
+                            screenshot_url=result.get("screenshot_url") # If available
+                        )
+                    except Exception as err:
+                        logger.error(f"Failed to save mission step: {err}")
+
                 # Feedback loop
                 self._record_observation(f"Result for {action_type}: {json.dumps(result)}")
 
+        except Exception as e:
+            logger.error(f"[Agent] Mission Crashed: {e}")
+            if mission:
+                mission.status = "error"
+                mission.save()
         finally:
             if self.sandbox:
                 logger.info(f"[Agent] Closing sandbox: {self.sandbox.sandbox_id}")
