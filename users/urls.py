@@ -10,7 +10,8 @@ from .views import (
     ResendOTPView,
     GithubLoginView,
     ForgotPasswordView,
-    ResetPasswordView
+    ResetPasswordView,
+    OnboardingView
 )
 
 app_name = 'users'
@@ -27,4 +28,5 @@ urlpatterns = [
     path('github/login/', GithubLoginView.as_view(), name='github-login'),
     path('forgot-password/', ForgotPasswordView.as_view(), name='forgot-password'),
     path('reset-password/', ResetPasswordView.as_view(), name='reset-password'),
+    path('onboarding/', OnboardingView.as_view(), name='onboarding'),
 ]

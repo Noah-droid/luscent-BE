@@ -12,7 +12,8 @@ from .serializers import (
     APITokenSerializer,
     GithubLoginSerializer,
     ForgotPasswordSerializer,
-    ResetPasswordSerializer
+    ResetPasswordSerializer,
+    OnboardingSerializer
 )
 import requests
 from django.conf import settings
@@ -555,3 +556,26 @@ class ResetPasswordView(APIView):
             return Response({'message': 'Password reset successfully'}, status=200)
         except User.DoesNotExist:
             return Response({'error': 'User not found'}, status=404)
+
+
+class OnboardingView(APIView):
+    """
+    Complete user onboarding by saving full name and organization name.
+    Called once after email verification, before the dashboard is shown.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        serializer = OnboardingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        user.full_name = serializer.validated_data['full_name']
+        user.organization_name = serializer.validated_data['organization_name']
+        user.onboarding_completed = True
+        user.save(update_fields=['full_name', 'organization_name', 'onboarding_completed'])
+
+        return Response({
+            'message': 'Onboarding complete',
+            'user': UserSerializer(user).data
+        }, status=status.HTTP_200_OK)
