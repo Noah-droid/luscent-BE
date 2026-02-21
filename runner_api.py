@@ -110,3 +110,9 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+
+
+
+
+# thinking of something. what if we give the agent the ability to pull codes from repos, test if they are FE or BE, understand the context of the projects. Such that it will be able to test native applications, mobiles app, agent-to-agent testing(chatbots), while giving users the abilty to "manual test" also on our frontend depending on what they want to test

@@ -342,3 +342,99 @@ def check_periodic_schedules_task():
     
     finally:
         cache.delete(lock_id)
+
+
+@shared_task(name="run_autonomous_mission", time_limit=3600) # 1 hour max for deep audits
+def run_autonomous_mission_task(mission_id, user_id):
+    """
+    Standardizes the launch of an Autonomous Agent for a specific Mission instance.
+    """
+    from .models import AgentMission, AgentMissionStep, TestCase, TestRun
+    from collection.models import Collection
+    from users.models import User
+    from .autonomous_agent import AutonomousAgent
+    import json
+    
+    user = User.objects.get(id=user_id)
+    mission = AgentMission.objects.get(id=mission_id)
+    collection = mission.collection
+    
+    # 1. Update status
+    mission.status = "running"
+    mission.save()
+    
+    # 2. Extract context
+    project = collection.project
+    project_vars = project.environment_variables or {}
+    
+    # Customize mission depth/scenarios based on mission_type
+    if mission.mission_type == "security_audit":
+        scenarios = "SECURITY, AUTH_BYPASS, INJECTION, IDOR"
+        categories = ["security"]
+    else:
+        scenarios = "HAPPY_PATH, VALIDATION_ERROR, EDGE_CASE"
+        categories = ["functional"]
+
+    # 3. Initialize Agent
+    agent = AutonomousAgent(
+        collection,
+        user_story=mission.user_story,
+        env_vars=project_vars,
+        scenarios=scenarios,
+        categories=categories,
+        layer="backend",
+        runner_types=["http", "browser"], # default to both for missions
+        mission_id=mission.id
+    )
+    
+    # Load browser config if any
+    if mission.browser_config:
+        agent.browser_config = mission.browser_config
+
+    # 4. Run Mission
+    try:
+        mission_depth = 40 if mission.mission_type == "security_audit" else 25
+        steps_log = agent.run_mission(max_steps=mission_depth)
+        
+        # 5. Conversion to TestRuns logic (Same as CollectionAutoPilot)
+        mission_summary = ""
+        for step in steps_log:
+            if step['action'] == 'FINISH':
+                mission_summary = step.get('reason', '')
+                continue
+            
+            if step['action'] == 'CALL_API':
+                endpoint = collection.endpoints.filter(method=step['method'], url=step['url']).first()
+                if not endpoint and step.get('url'):
+                    endpoint = collection.endpoints.filter(url__icontains=step['url']).first()
+                
+                if endpoint:
+                    test_case = TestCase.objects.create(
+                        endpoint=endpoint,
+                        name=f"{mission.get_mission_type_display()} Step: {step['endpoint']}",
+                        description=step['reason'],
+                        runner_type="http",
+                        category=categories[0],
+                        ai_generated=True,
+                        user_story=mission.user_story,
+                        assertions=[{"type": "status", "value": step['response']['status']}]
+                    )
+                    
+                    TestRun.objects.create(
+                        test_case=test_case,
+                        batch_id=mission.batch_id,
+                        status="passed" if step['status'] == "passed" else "failed",
+                        response_status=step['response']['status'],
+                        response_body=step['response']['body'],
+                        response_time_ms=step['response']['duration_ms'],
+                        logs=f"MISSION TYPE: {mission.mission_type.upper()}\nTHOUGHT: {step['reason']}\n\n{step.get('logs','')}",
+                        triggered_by="ai_agent"
+                    )
+        
+        mission.status = "completed"
+        mission.save()
+        
+    except Exception as e:
+        logger.error(f"Mission {mission_id} failed: {e}")
+        mission.status = "error"
+        mission.save()

@@ -18,6 +18,11 @@ class Project(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+    # Advanced: Repo Integration (Whitebox Testing)
+    repo_url = models.URLField(blank=True, null=True, help_text="GitHub/GitLab repository URL for white-box testing")
+    repo_branch = models.CharField(max_length=100, default='main', blank=True, help_text="Branch to clone")
+    repo_type = models.CharField(max_length=50, blank=True, null=True, help_text="e.g., 'frontend', 'backend', 'mobile', 'fullstack'")
+    
     # Storage quota tracking
     storage_used_bytes = models.BigIntegerField(default=0, help_text="Total storage used in bytes")
     storage_quota_bytes = models.BigIntegerField(default=104_857_600, help_text="Storage quota in bytes (default: 100 MB)")

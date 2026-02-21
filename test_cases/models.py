@@ -38,6 +38,9 @@ class TestCase(models.Model):
     # E2B Session Support
     keep_alive = models.BooleanField(default=False, help_text="If true, the E2B sandbox will be kept alive for a period after execution")
 
+    # Advanced Browser Config (Cross-Browser, Multi-Device, Throttling)
+    browser_config = models.JSONField(default=dict, blank=True, help_text="Configs like: {'browser': 'firefox', 'device': 'iPhone 14', 'network': 'Slow_3G', 'geolocation': ...}")
+
     # Classification
     CATEGORY_CHOICES = [
         ("functional", "Functional"),
@@ -148,6 +151,9 @@ class TestRun(models.Model):
     # E2B Session Persistence
     sandbox_id = models.CharField(max_length=100, blank=True, null=True, help_text="E2B Sandbox ID for session persistence")
     
+    # Advanced Browser Execution Profile (used for this specific run)
+    browser_config = models.JSONField(default=dict, blank=True, help_text="Config used: browser, device, network throttling")
+
     # New: Hybrid/Self-Hosted Support
     # assigned_runner = models.ForeignKey(
     #     'remote_runners.RemoteRunner', 
@@ -170,12 +176,19 @@ class AgentMission(models.Model):
         ("error", "Error"),
         ("paused", "Paused (Waiting for Input)"),
     ]
+    MISSION_TYPES = [
+        ("qa_testing", "QA Feature Testing"),
+        ("security_audit", "Security Pentesting"),
+    ]
     
     user = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name="agent_missions")
     collection = models.ForeignKey('collection.Collection', on_delete=models.CASCADE, related_name="agent_missions")
     user_story = models.TextField()
+    mission_type = models.CharField(max_length=20, choices=MISSION_TYPES, default="qa_testing")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="running")
     batch_id = models.UUIDField(db_index=True, unique=True)
+    browser_config = models.JSONField(default=dict, blank=True, help_text="Configs like: {'browser': 'firefox', 'device': 'iPhone 14'}")
+    session_url = models.URLField(blank=True, null=True, help_text="Public URL to the running Sandbox for manual testing")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -692,6 +692,63 @@ class ProjectAutoPilotView(APIView):
         }, status=status.HTTP_202_ACCEPTED)
 
 
+class ProjectSecurityAuditView(APIView):
+    """
+    Triggers a specialized Security Pentesting Mission for a project.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Trigger a Security Audit for an entire project",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'browser_config': openapi.Schema(type=openapi.TYPE_OBJECT, description="Optional browser configuration")
+            }
+        ),
+        responses={202: "Security Audit started"}
+    )
+    def post(self, request, project_id):
+        project = get_object_or_404(Project, id=project_id, user=request.user)
+        browser_config = request.data.get("browser_config", {})
+
+        from .tasks import HAS_CELERY
+        if not HAS_CELERY:
+            return Response({"error": "Security Audits require Celery."}, status=501)
+
+        if request.user.token_balance < 5:
+            return Response({"error": "Insufficient tokens for a Security Audit (5 tokens required)."}, status=402)
+
+        import uuid
+        batch_id = uuid.uuid4()
+        
+        # We need a collection to link to if possible, or handle NULL in models (currently required)
+        first_collection = project.collections.first()
+        if not first_collection:
+             return Response({"error": "Project must have at least one collection (import Swagger first)."}, status=400)
+
+        from .models import AgentMission
+        mission = AgentMission.objects.create(
+            user=request.user,
+            collection=first_collection,
+            user_story=f"SECURITY AUDIT: Systematically identify vulnerabilities across {project.name}. Focus on XSS, SQLi, and Auth Bypass.",
+            mission_type="security_audit",
+            batch_id=batch_id,
+            browser_config=browser_config
+        )
+
+        from .tasks import run_autonomous_mission_task
+        run_autonomous_mission_task.delay(
+            mission_id=mission.id,
+            user_id=request.user.id
+        )
+
+        return Response({
+            "message": "Security Audit queued.",
+            "batch_id": str(batch_id)
+        }, status=status.HTTP_202_ACCEPTED)
+
+
 class CollectionAutoPilotView(APIView):
     """
     Triggers AI generation and execution for all endpoints in a specific collection.

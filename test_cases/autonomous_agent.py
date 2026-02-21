@@ -46,6 +46,7 @@ class AutonomousAgent:
         self.history = [] 
         self.extracted_vars = {} 
         self.sandbox = None # Initialized during mission
+        self.browser_config = {} # Initialized from mission context
         self.mail_session = None # Mail.tm session
         self.current_email = None
         
@@ -65,6 +66,7 @@ class AutonomousAgent:
                 mission = AgentMission.objects.get(id=self.mission_id)
                 mission.status = "running"
                 mission.save()
+                self.browser_config = mission.browser_config or {}
             except AgentMission.DoesNotExist:
                 logger.warning(f"[Agent] Mission ID {self.mission_id} not found.")
 
@@ -93,6 +95,11 @@ class AutonomousAgent:
             try:
                 logger.info(f"[Agent] Spawning sandbox environment: {self.sandbox_template}")
                 self.sandbox = Sandbox(template=self.sandbox_template, api_key=self.e2b_api_key)
+                
+                # If we have a repo linked, set it up immediately
+                if mission and mission.collection.project.repo_url:
+                    self._execute_whitebox_setup(mission.collection.project, mission)
+                
             except Exception as e:
                 logger.error(f"[Agent] Failed to spawn sandbox: {e}")
 
@@ -203,6 +210,75 @@ class AutonomousAgent:
 
         return steps_log
 
+    def _execute_whitebox_setup(self, project, mission):
+        """
+        Clones the user's repository, injects their environment variables, and starts the server in the background.
+        It then records the E2B public exposed URL for the user to 'Manual Test' the Live Sandbox.
+        """
+        if not self.sandbox:
+            return
+            
+        repo_url = project.repo_url
+        repo_branch = project.repo_branch or "main"
+        
+        logger.info(f"[Agent] (WhiteBox) Cloning {repo_url} (branch: {repo_branch})...")
+        
+        # 1. Clone Repo
+        clone_cmd = f"git clone --branch {repo_branch} {repo_url} /app/source"
+        self.sandbox.commands.run(clone_cmd)
+        
+        # 2. Build Environment variables mapping
+        env_mapping = dict(project.environment_variables) if project.environment_variables else {}
+        # Also let the frontend know we're in test mode if needed
+        env_mapping["NODE_ENV"] = "development"
+        
+        # 3. Determine Start Command and Port based on repo_type
+        # Defaulting to standard frontend (npm run dev) on port 3000
+        start_cmd = "npm install --legacy-peer-deps && npm run dev"
+        target_port = 3000
+        
+        if project.repo_type == "backend":
+            target_port = 8000
+            start_cmd = "pip install -r requirements.txt && python manage.py runserver 0.0.0.0:8000"
+            
+        logger.info(f"[Agent] (WhiteBox) Starting server via: {start_cmd}")
+        
+        # 4. Start Server in Background
+        self.sandbox.commands.run(
+            start_cmd, 
+            cwd="/app/source",
+            envs=env_mapping,
+            background=True
+        )
+        
+        # 5. Wait for the server to be ready and assign exposed URL
+        logger.info(f"[Agent] (WhiteBox) Waiting for server on port {target_port}...")
+        time.sleep(10) # Give the frontend dev server a moment to bind
+        
+        try:
+            # E2B creates a public URL for exposed ports
+            exposed_url = self.sandbox.get_host(target_port)
+            mission.session_url = f"https://{exposed_url}"
+            mission.save()
+            
+            # Make sure the Agent knows the new local base URL
+            self.extracted_vars["LOCAL_APP_URL"] = "http://localhost:" + str(target_port)
+            
+            # Add an initial thought step so the user knows what happened
+            AgentMissionStep.objects.create(
+                mission=mission,
+                step_number=0,
+                action_type="SHELL_COMMAND",
+                thought="I have successfully cloned the repository, injected the environment variables, and started the app in the sandbox.",
+                details={"command": clone_cmd + " && " + start_cmd},
+                response_body=f"App is running locally at {self.extracted_vars['LOCAL_APP_URL']} and exposed publicly at {mission.session_url}",
+                response_status=0,
+                status="passed"
+            )
+            logger.info(f"[Agent] (WhiteBox) Server running successfully at {mission.session_url}")
+        except Exception as e:
+            logger.error(f"[Agent] (WhiteBox) Failed to get host URL: {e}")
+
     def _execute_api_call(self, action, endpoint_map):
         """Runs an API request script inside the sandbox for state persistence."""
         endpoint_id = action.get("endpoint_id")
@@ -278,6 +354,38 @@ except Exception as e:
 
         logger.info(f"[Agent] E2B Browser Action: {action.get('action')} on {action.get('url') or action.get('selector')}")
         
+        cfg = self.browser_config or {}
+        b_type = (cfg.get("browser") or "chromium").lower()
+        if b_type == "firefox":
+            browser_type_override = "browser = p.firefox.launch(headless=True)"
+        elif b_type in ["webkit", "safari"]:
+            browser_type_override = "browser = p.webkit.launch(headless=True)"
+        else:
+            browser_type_override = "browser = p.chromium.launch(headless=True)"
+            
+        context_opts = []
+        if cfg.get("device"):
+            context_opts.append(f"**p.devices['{cfg.get('device')}']")
+        if cfg.get("geolocation"):
+            geo = cfg.get('geolocation')
+            context_opts.append(f"geolocation={{'latitude': {geo.get('latitude', 0)}, 'longitude': {geo.get('longitude', 0)}}}, permissions=['geolocation']")
+            
+        context_str = ", ".join(context_opts)
+        context_launch = f"context = browser.new_context({context_str})" if context_opts else "context = browser.new_context()"
+        
+        throttle_block = ""
+        if cfg.get("network") and b_type == "chromium":
+            speed_map = {
+                "Fast_3G": "{'offline': False, 'downloadThroughput': 1.6 * 1024 * 1024 / 8, 'uploadThroughput': 750 * 1024 / 8, 'latency': 150}",
+                "Slow_3G": "{'offline': False, 'downloadThroughput': 500 * 1024 / 8, 'uploadThroughput': 500 * 1024 / 8, 'latency': 400}",
+                "Offline": "{'offline': True, 'downloadThroughput': 0, 'uploadThroughput': 0, 'latency': 0}",
+            }
+            if cfg.get("network") in speed_map:
+                throttle_block = f"""
+            client = context.new_cdp_session(page)
+            client.send('Network.emulateNetworkConditions', {speed_map[cfg.get('network')]})
+                """
+
         # We write a standalone script to the sandbox that uses its local Playwright
         script = f"""
 from playwright.sync_api import sync_playwright
@@ -286,8 +394,10 @@ import base64
 
 def run():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        {browser_type_override}
+        {context_launch}
+        page = context.new_page()
+        {throttle_block}
         
         try:
             # Action
