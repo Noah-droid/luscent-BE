@@ -79,7 +79,7 @@ def project_auto_pilot_task(project_id, user_id, scenarios, batch_id, user_story
         for endpoint in endpoints:
             for category in categories:
                 # 1. Billing check for AI
-                AI_COST = 5
+                AI_COST = calculate_test_cost('ai_generation')
                 context_label = f"{category.upper()}"
                 if not deduct_tokens(user, AI_COST, f"Auto-Pilot ({context_label}): {endpoint.name}"):
                     logger.warning(f"Insufficient tokens for Auto-Pilot on {endpoint.name}")
@@ -168,7 +168,7 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     # We NO LONGER iterate over runner_types directly. We pass the list to the AI
     # and let the AI decide the best runner (HTTP vs Browser) for each endpoint.
     
-    # REWRITTEN: AUTONOMOUS AGENT ENGINE (Vibe Coding)
+
     from .autonomous_agent import AutonomousAgent
     from .models import TestCase, TestRun, AgentMission
     import json
@@ -176,10 +176,10 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     # If no story provided, use collection context or project context
     final_story = user_story or collection.user_story or collection.description or collection.project.user_story or collection.project.description or ""
     
-    # 1. Billing check for AGENT SESSION (Premium Feature)
-    AGENT_SESSION_COST = 50 
-    if not deduct_tokens(user, AGENT_SESSION_COST, f"Autonomous Agent Mission: {collection.name}"):
-        logger.warning(f"Insufficient tokens for Agent Mission on {collection.name}")
+    # 1. Billing check for AGENT SESSION (Hybrid: Entry Fee)
+    AGENT_ENTRY_COST = calculate_test_cost('agent_mission_entry') 
+    if not deduct_tokens(user, AGENT_ENTRY_COST, f"Autonomous Agent Entry: {collection.name}"):
+        logger.warning(f"Insufficient tokens for Agent Entry on {collection.name}")
         return
 
     # 1.5 Create Agent Mission (For Live Tracking)
