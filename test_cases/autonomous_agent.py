@@ -152,7 +152,30 @@ class AutonomousAgent:
                     self._record_observation(f"Error from Brain: {action.get('reason')}. Retrying.")
                     continue
 
-                # DISPATCH TO SANDBOX
+                # DISPATCH TO SANDBOX (with Hybrid Billing)
+                from billing.services import deduct_tokens, calculate_test_cost
+                
+                # Map action to billing type
+                billing_map = {
+                    "CALL_API": "http",
+                    "BROWSER_ACTION": "browser",
+                    "STRESS_TEST": "load",
+                    "SHELL_COMMAND": "shell_command",
+                    "MAIL_ACTION": "mail_action"
+                }
+                
+                cost_key = billing_map.get(action_type, "http")
+                step_cost = calculate_test_cost(cost_key)
+                
+                # Deduct tokens for the step
+                if mission:
+                    user = mission.user
+                    success = deduct_tokens(user, step_cost, f"Agent Step {step_i}: {action_type}", ref_id=mission.id)
+                    if not success:
+                        logger.error(f"[Agent] Insufficient tokens for step {step_i}. Mission aborted.")
+                        self._record_observation("Error: Out of tokens. Mission ending.")
+                        break
+
                 result = None
                 if action_type == "CALL_API":
                     result = self._execute_api_call(action, endpoint_map)
@@ -582,6 +605,7 @@ YOUR TOOLSET:
 {"2. BROWSER_ACTION: Use this to test the UI/UX via Playwright inside the sandbox." if has_browser else ""}
 {"3. STRESS_TEST: Use this if the user wants to test performance." if has_load else ""}
 4. SHELL_COMMAND: Use this to run any CLI commands, check files, or use Linux tools.
+   - For Security Missions, use: `sqlmap`, `nmap`, `zap-cli`, `gitleaks` (for secrets in code), or `owasp-dependency-check`.
 5. MAIL_ACTION: Use this to handle OTPs and real email verification.
    - Use 'create' to get a new address.
    - Use 'get_messages' to check the inbox and find OTP codes.
