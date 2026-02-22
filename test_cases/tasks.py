@@ -384,7 +384,8 @@ def run_autonomous_mission_task(mission_id, user_id):
         categories=categories,
         layer="backend",
         runner_types=["http", "browser"], # default to both for missions
-        mission_id=mission.id
+        mission_id=mission.id,
+        is_safe_mode=mission.is_safe_mode
     )
     
     # Load browser config if any

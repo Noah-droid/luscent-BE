@@ -670,25 +670,36 @@ class ProjectAutoPilotView(APIView):
         import uuid
         batch_id = uuid.uuid4()
         
-   
-        from .tasks import project_auto_pilot_task
+        from .models import AgentMission
         
-        project_auto_pilot_task.delay(
-            project_id=str(project.id),
-            user_id=request.user.id,
-            scenarios=scenarios,
-            batch_id=str(batch_id),
-            user_story=user_story,
-            runner_types=runner_types,
-            categories=categories,
-            layer=layer,
-            use_visual_ai=use_visual_ai
+        # We need a collection to link to if possible
+        first_collection = project.collections.first()
+        if not first_collection:
+             return Response({"error": "Project must have at least one collection (import Swagger first)."}, status=400)
+
+        # Detect Safe Mode: True if any endpoint starts with a production URL or if explicitly requested
+        is_safe_mode = request.data.get("is_safe_mode", True)
+        
+        mission = AgentMission.objects.create(
+            user=request.user,
+            collection=first_collection,
+            user_story=user_story or f"Perform a comprehensive QA mission for {project.name}. Verify all core features.",
+            mission_type="qa_testing",
+            batch_id=batch_id,
+            browser_config=request.data.get("browser_config", {}),
+            is_safe_mode=is_safe_mode
+        )
+
+        from .tasks import run_autonomous_mission_task
+        run_autonomous_mission_task.delay(
+            mission_id=mission.id,
+            user_id=request.user.id
         )
 
         return Response({
-            "message": "Auto-Pilot started successfully",
-            "batch_id": batch_id,
-            "description": f"Generating and running tests for all endpoints in {project.name}."
+            "message": "Project Auto-Pilot Mission started.",
+            "batch_id": str(batch_id),
+            "mission_id": mission.id
         }, status=status.HTTP_202_ACCEPTED)
 
 
@@ -716,8 +727,12 @@ class ProjectSecurityAuditView(APIView):
         if not HAS_CELERY:
             return Response({"error": "Security Audits require Celery."}, status=501)
 
-        if request.user.token_balance < 5:
-            return Response({"error": "Insufficient tokens for a Security Audit (5 tokens required)."}, status=402)
+        from billing.services import calculate_test_cost
+        from billing.services import calculate_test_cost
+        SECURITY_AUDIT_ENTRY = calculate_test_cost('security_audit_entry')
+
+        if request.user.token_balance < SECURITY_AUDIT_ENTRY:
+            return Response({"error": f"Insufficient tokens for a Security Audit ({SECURITY_AUDIT_ENTRY} tokens required to start)."}, status=402)
 
         import uuid
         batch_id = uuid.uuid4()

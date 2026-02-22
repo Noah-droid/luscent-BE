@@ -189,6 +189,7 @@ class AgentMission(models.Model):
     batch_id = models.UUIDField(db_index=True, unique=True)
     browser_config = models.JSONField(default=dict, blank=True, help_text="Configs like: {'browser': 'firefox', 'device': 'iPhone 14'}")
     session_url = models.URLField(blank=True, null=True, help_text="Public URL to the running Sandbox for manual testing")
+    is_safe_mode = models.BooleanField(default=True, help_text="In Safe Mode, the agent avoids destructive actions (Delete, Update) on production URLs.")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
