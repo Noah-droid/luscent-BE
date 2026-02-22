@@ -5,11 +5,15 @@ from .models import User, APIToken
 
 class UserSerializer(serializers.ModelSerializer):
     """User serializer"""
+    has_github_linked = serializers.SerializerMethodField()
     
     class Meta:
         model = User
-        fields = ['id', 'email', 'username', 'full_name', 'organization_name', 'onboarding_completed', 'created_at']
+        fields = ['id', 'email', 'username', 'full_name', 'organization_name', 'onboarding_completed', 'created_at', 'github_username', 'has_github_linked']
         read_only_fields = ['id', 'created_at']
+
+    def get_has_github_linked(self, obj):
+        return bool(obj.github_token)
 
 
 class RegisterSerializer(serializers.ModelSerializer):

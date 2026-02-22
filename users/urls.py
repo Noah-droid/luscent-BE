@@ -9,6 +9,8 @@ from .views import (
     VerifyEmailView,
     ResendOTPView,
     GithubLoginView,
+    GithubLinkView,
+    GithubReposView,
     ForgotPasswordView,
     ResetPasswordView,
     OnboardingView
@@ -26,6 +28,8 @@ urlpatterns = [
     path('tokens/', UserTokensView.as_view(), name='tokens'),
     path('token/refresh/', RefreshTokenView.as_view(), name='token-refresh'),
     path('github/login/', GithubLoginView.as_view(), name='github-login'),
+    path('github/link/', GithubLinkView.as_view(), name='github-link'),
+    path('github/repos/', GithubReposView.as_view(), name='github-repos'),
     path('forgot-password/', ForgotPasswordView.as_view(), name='forgot-password'),
     path('reset-password/', ResetPasswordView.as_view(), name='reset-password'),
     path('onboarding/', OnboardingView.as_view(), name='onboarding'),

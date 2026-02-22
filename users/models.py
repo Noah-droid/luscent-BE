@@ -20,6 +20,10 @@ class User(AbstractUser):
     is_verified = models.BooleanField(default=False)
     verification_token = models.CharField(max_length=100, blank=True, null=True)
     
+    # Integrations
+    github_token = models.CharField(max_length=255, blank=True, null=True, help_text="User's GitHub Personal Access Token for repo fetching")
+    github_username = models.CharField(max_length=255, blank=True, null=True)
+    
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['username']
     

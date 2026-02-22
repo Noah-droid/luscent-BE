@@ -454,7 +454,11 @@ class GithubLoginView(APIView):
                         password=None # Unusable password
                     )
                     user.is_verified = True # Trusted source
-                    user.save()
+
+                # Save Github Token
+                user.github_token = access_token
+                user.github_username = user_data.get('login')
+                user.save()
 
                 # Generate Tokens
                 api_token, _ = APIToken.objects.get_or_create(
@@ -479,6 +483,126 @@ class GithubLoginView(APIView):
             'refresh_token': str(refresh),  
         })
 
+
+class GithubReposView(APIView):
+    """
+    Fetch repositories for the authenticated user using their GitHub Token.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Fetch authenticated user's GitHub repositories",
+        responses={
+            200: "List of repositories",
+            400: "GitHub not linked",
+            500: "Failed to fetch repositories"
+        }
+    )
+    def get(self, request):
+        user = request.user
+        if not user.github_token:
+            return Response(
+                {"error": "GitHub account not linked."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        headers = {
+            'Authorization': f'token {user.github_token}',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        
+        # Simple request to get repos (public and private, limit 100 for now)
+        try:
+            resp = requests.get('https://api.github.com/user/repos?per_page=100&sort=updated', headers=headers)
+            if resp.status_code == 401:
+                # Token might be expired or revoked
+                user.github_token = None
+                user.github_username = None
+                user.save()
+                return Response({"error": "GitHub token expired. Please re-link."}, status=status.HTTP_400_BAD_REQUEST)
+                
+            resp.raise_for_status()
+            repos = resp.json()
+            
+            # Format the output slightly
+            repo_list = [
+                {
+                    "id": r.get('id'),
+                    "name": r.get('name'),
+                    "full_name": r.get('full_name'),
+                    "html_url": r.get('html_url'),
+                    "default_branch": r.get('default_branch', 'main'),
+                    "private": r.get('private', False),
+                    "description": r.get('description', '')
+                }
+                for r in repos
+            ]
+            
+            return Response(repo_list)
+        except requests.exceptions.RequestException as e:
+            return Response(
+                {"error": "Failed to fetch repositories from GitHub.", "details": str(e)}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class GithubLinkView(APIView):
+    """
+    Link a GitHub account to the currently authenticated user using the OAuth code.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Link GitHub account",
+        request_body=GithubLoginSerializer,
+        responses={
+            200: "Successfully linked",
+            400: "Invalid code"
+        }
+    )
+    def post(self, request):
+        serializer = GithubLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        code = serializer.validated_data['code']
+        
+        token_url = "https://github.com/login/oauth/access_token"
+        payload = {
+            'client_id': settings.GITHUB_CLIENT_ID,
+            'client_secret': settings.GITHUB_CLIENT_SECRET,
+            'code': code
+        }
+        headers = {'Accept': 'application/json'}
+        
+        try:
+            response = requests.post(token_url, data=payload, headers=headers)
+            response.raise_for_status()
+            token_data = response.json()
+        except requests.exceptions.RequestException:
+            return Response({'error': 'Failed to connect to GitHub'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        if 'error' in token_data:
+            return Response({'error': token_data.get('error_description', 'Invalid code')}, status=status.HTTP_400_BAD_REQUEST)
+            
+        access_token = token_data.get('access_token')
+        
+        # We need the username
+        try:
+            user_resp = requests.get("https://api.github.com/user", headers={'Authorization': f'token {access_token}'})
+            user_resp.raise_for_status()
+            gh_username = user_resp.json().get('login')
+        except:
+            gh_username = "linked_user"
+            
+        # Save to current user
+        user = request.user
+        user.github_token = access_token
+        user.github_username = gh_username
+        user.save()
+        
+        return Response({
+            "message": "GitHub account successfully linked.",
+            "github_username": gh_username
+        })
 
 class ForgotPasswordView(APIView):
     """

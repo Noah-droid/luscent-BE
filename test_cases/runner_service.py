@@ -599,9 +599,65 @@ class RunnerService:
             test_run.error_message = "No test script provided for browser test."
             return
 
-        # Ensure necessary imports
+        # Prepare Browser Configuration String
+        # E.g. test_case.browser_config = {"browser": "firefox", "network": "Fast_3G", "geolocation": {"latitude": 48.8584, "longitude": 2.2945}}
+        cfg = test_case.browser_config or {}
+        
+        # Determine Browser Type
+        browser_type_override = ""
+        b_type = (cfg.get("browser") or "chromium").lower()
+        if b_type == "firefox":
+            browser_type_override = "browser = p.firefox.launch(headless=True)\n"
+        elif b_type in ["webkit", "safari"]:
+            browser_type_override = "browser = p.webkit.launch(headless=True)\n"
+        
+        # Playwright Context Options (Device emulation, geolocation)
+        context_opts = []
+        if cfg.get("device"):
+            context_opts.append(f"**p.devices['{cfg.get('device')}']") # e.g. iPhone 14
+        if cfg.get("geolocation"):
+            geo = cfg.get('geolocation')
+            context_opts.append(f"geolocation={{'latitude': {geo.get('latitude', 0)}, 'longitude': {geo.get('longitude', 0)}}}, permissions=['geolocation']")
+
+        # Network Throttling (Simulated locally inside page context script)
+        # Note: True throttling is complex in PW, but we can simulate via CDP sessions for chromium
+        cdp_throttle_script = ""
+        if cfg.get("network") and b_type == "chromium":
+            speed_map = {
+                "Fast_3G": "{'offline': False, 'downloadThroughput': 1.6 * 1024 * 1024 / 8, 'uploadThroughput': 750 * 1024 / 8, 'latency': 150}",
+                "Slow_3G": "{'offline': False, 'downloadThroughput': 500 * 1024 / 8, 'uploadThroughput': 500 * 1024 / 8, 'latency': 400}",
+                "Offline": "{'offline': True, 'downloadThroughput': 0, 'uploadThroughput': 0, 'latency': 0}",
+            }
+            if cfg.get("network") in speed_map:
+                cdp_throttle_script = f"""
+        client = page.context.new_cdp_session(page)
+        client.send('Network.emulateNetworkConditions', {speed_map[cfg.get('network')]})
+        """
+
+        # Inject transformations
+        # 1. Add required imports:
         if "from playwright.sync_api" not in script_content:
             script_content = "from playwright.sync_api import sync_playwright\n" + script_content
+
+        # 2. Modify `chromium.launch` to other browser if needed
+        if browser_type_override and "p.chromium.launch" in script_content:
+            script_content = script_content.replace("browser = p.chromium.launch(headless=True)", browser_type_override)
+            script_content = script_content.replace("browser = p.chromium.launch()", browser_type_override)
+        
+        # 3. Modify `browser.new_page()` to `browser.new_context(...)` -> `context.new_page()`
+        if len(context_opts) > 0 and "browser.new_page()" in script_content:
+            context_str = ", ".join(context_opts)
+            replacement = f"context = browser.new_context({context_str})\n        page = context.new_page()"
+            script_content = script_content.replace("page = browser.new_page()", replacement)
+        
+        # 4. Inject network throttling immediately after `page` is created
+        if cdp_throttle_script and "page.goto(" in script_content:
+             # Find first occurrence of goto and inject right before it
+             parts = script_content.split("page.goto(", 1)
+             script_content = parts[0] + cdp_throttle_script + "page.goto(" + parts[1]
+
+        # Save config footprint for visibility
+        test_run.browser_config = cfg
 
         # Run in sandbox
         result = self._run_in_sandbox(

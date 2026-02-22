@@ -230,6 +230,17 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_IMPORTS = ('test_cases.tasks', 'collection.tasks')
 
+# Cache Configuration
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": config('CELERY_BROKER_URL', default='redis://localhost:6379/0'),
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
+    }
+}
+
 # CELERY_BEAT_SCHEDULE = {
 #     'check-periodic-test-schedules': {
 #         'task': 'check_periodic_schedules',

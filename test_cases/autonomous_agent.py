@@ -2,7 +2,9 @@ import logging
 import time
 import requests
 import re
+import json
 from django.conf import settings
+from .models import AgentMission, AgentMissionStep, AgentPrompt
 
 try:
     from e2b import Sandbox
@@ -16,8 +18,10 @@ class AutonomousAgent:
     A Self-Driving QA Agent that executes API tests live, reacts to errors,
     and maintains state like a human tester.
     """
-    def __init__(self, collection, user_story=None, env_vars=None, scenarios=None, categories=None, layer="backend", runner_types=None):
+    def __init__(self, collection, user_story=None, env_vars=None, scenarios=None, categories=None, layer="backend", runner_types=None, mission_id=None, is_safe_mode=True):
         self.collection = collection
+        self.mission_id = mission_id
+        self.is_safe_mode = is_safe_mode
         self.user_story = user_story or "Explore the API and ensure core functionality works."
         self.env_vars = env_vars or {}
         
@@ -43,6 +47,7 @@ class AutonomousAgent:
         self.history = [] 
         self.extracted_vars = {} 
         self.sandbox = None # Initialized during mission
+        self.browser_config = {} # Initialized from mission context
         self.mail_session = None # Mail.tm session
         self.current_email = None
         
@@ -56,6 +61,16 @@ class AutonomousAgent:
         """
         logger.info(f"[Agent] Starting mission for {self.collection.name}: {self.user_story}")
         
+        mission = None
+        if self.mission_id:
+            try:
+                mission = AgentMission.objects.get(id=self.mission_id)
+                mission.status = "running"
+                mission.save()
+                self.browser_config = mission.browser_config or {}
+            except AgentMission.DoesNotExist:
+                logger.warning(f"[Agent] Mission ID {self.mission_id} not found.")
+
         # 1. Understudy: Initialize Context
         # We now include the schema and ensure IDs are strings for the JSON prompt.
         endpoints_raw = list(self.collection.endpoints.values(
@@ -81,6 +96,11 @@ class AutonomousAgent:
             try:
                 logger.info(f"[Agent] Spawning sandbox environment: {self.sandbox_template}")
                 self.sandbox = Sandbox(template=self.sandbox_template, api_key=self.e2b_api_key)
+                
+                # If we have a repo linked, set it up immediately
+                if mission and mission.collection.project.repo_url:
+                    self._execute_whitebox_setup(mission.collection.project, mission)
+                
             except Exception as e:
                 logger.error(f"[Agent] Failed to spawn sandbox: {e}")
 
@@ -93,6 +113,15 @@ class AutonomousAgent:
         try:
             # 3. The Loop
             for step_i in range(1, max_steps + 1):
+                # 3a. Check for user prompts (Live Interaction)
+                if mission:
+                    new_prompts = AgentPrompt.objects.filter(mission=mission, is_processed=False).order_by('created_at')
+                    for p in new_prompts:
+                        logger.info(f"[Agent] Received User Guidance: {p.prompt}")
+                        self.history.append({"role": "user", "content": f"USER GUIDANCE / INSTRUCTION: {p.prompt}"})
+                        p.is_processed = True
+                        p.save()
+
                 logger.info(f"--- [Step {step_i}/{max_steps}] Thinking ---")
                 
                 action = self._get_next_action()
@@ -106,6 +135,17 @@ class AutonomousAgent:
                         "step": step_i, "action": "FINISH", "reason": action.get("reason"),
                         "self_correction_count": correction_count, "status": "success"
                     })
+                    if mission:
+                        mission.status = "completed"
+                        mission.save()
+                        
+                        AgentMissionStep.objects.create(
+                            mission=mission,
+                            step_number=step_i,
+                            action_type="FINISH",
+                            thought=action.get("reason"),
+                            status="passed"
+                        )
                     break
                     
                 if action.get("type") == "ERROR":
@@ -113,7 +153,30 @@ class AutonomousAgent:
                     self._record_observation(f"Error from Brain: {action.get('reason')}. Retrying.")
                     continue
 
-                # DISPATCH TO SANDBOX
+                # DISPATCH TO SANDBOX (with Hybrid Billing)
+                from billing.services import deduct_tokens, calculate_test_cost
+                
+                # Map action to billing type
+                billing_map = {
+                    "CALL_API": "http",
+                    "BROWSER_ACTION": "browser",
+                    "STRESS_TEST": "load",
+                    "SHELL_COMMAND": "shell_command",
+                    "MAIL_ACTION": "mail_action"
+                }
+                
+                cost_key = billing_map.get(action_type, "http")
+                step_cost = calculate_test_cost(cost_key)
+                
+                # Deduct tokens for the step
+                if mission:
+                    user = mission.user
+                    success = deduct_tokens(user, step_cost, f"Agent Step {step_i}: {action_type}", ref_id=mission.id)
+                    if not success:
+                        logger.error(f"[Agent] Insufficient tokens for step {step_i}. Mission aborted.")
+                        self._record_observation("Error: Out of tokens. Mission ending.")
+                        break
+
                 result = None
                 if action_type == "CALL_API":
                     result = self._execute_api_call(action, endpoint_map)
@@ -132,21 +195,113 @@ class AutonomousAgent:
                 if status == "failed":
                     correction_count += 1
 
-                steps_log.append({
+                step_data = {
                     "step": step_i, "action": action_type,
                     "details": action, "response": result,
                     "status": status
-                })
+                }
+                steps_log.append(step_data)
                 
+                # Live Recording
+                if mission:
+                    try:
+                        AgentMissionStep.objects.create(
+                            mission=mission,
+                            step_number=step_i,
+                            action_type=action_type,
+                            thought=reason,
+                            details=action,
+                            response_body=str(result.get("body", result.get("stdout", result.get("error", "")))),
+                            response_status=result.get("status") if isinstance(result.get("status"), int) else (result.get("exit_code") if isinstance(result.get("exit_code"), int) else None),
+                            status=status,
+                            screenshot_url=result.get("screenshot_url") # If available
+                        )
+                    except Exception as err:
+                        logger.error(f"Failed to save mission step: {err}")
+
                 # Feedback loop
                 self._record_observation(f"Result for {action_type}: {json.dumps(result)}")
 
+        except Exception as e:
+            logger.error(f"[Agent] Mission Crashed: {e}")
+            if mission:
+                mission.status = "error"
+                mission.save()
         finally:
             if self.sandbox:
                 logger.info(f"[Agent] Closing sandbox: {self.sandbox.sandbox_id}")
                 self.sandbox.close()
 
         return steps_log
+
+    def _execute_whitebox_setup(self, project, mission):
+        """
+        Clones the user's repository, injects their environment variables, and starts the server in the background.
+        It then records the E2B public exposed URL for the user to 'Manual Test' the Live Sandbox.
+        """
+        if not self.sandbox:
+            return
+            
+        repo_url = project.repo_url
+        repo_branch = project.repo_branch or "main"
+        
+        logger.info(f"[Agent] (WhiteBox) Cloning {repo_url} (branch: {repo_branch})...")
+        
+        # 1. Clone Repo
+        clone_cmd = f"git clone --branch {repo_branch} {repo_url} /app/source"
+        self.sandbox.commands.run(clone_cmd)
+        
+        # 2. Build Environment variables mapping
+        env_mapping = dict(project.environment_variables) if project.environment_variables else {}
+        # Also let the frontend know we're in test mode if needed
+        env_mapping["NODE_ENV"] = "development"
+        
+        # 3. Determine Start Command and Port based on repo_type
+        # Defaulting to standard frontend (npm run dev) on port 3000
+        start_cmd = "npm install --legacy-peer-deps && npm run dev"
+        target_port = 3000
+        
+        if project.repo_type == "backend":
+            target_port = 8000
+            start_cmd = "pip install -r requirements.txt && python manage.py runserver 0.0.0.0:8000"
+            
+        logger.info(f"[Agent] (WhiteBox) Starting server via: {start_cmd}")
+        
+        # 4. Start Server in Background
+        self.sandbox.commands.run(
+            start_cmd, 
+            cwd="/app/source",
+            envs=env_mapping,
+            background=True
+        )
+        
+        # 5. Wait for the server to be ready and assign exposed URL
+        logger.info(f"[Agent] (WhiteBox) Waiting for server on port {target_port}...")
+        time.sleep(10) # Give the frontend dev server a moment to bind
+        
+        try:
+            # E2B creates a public URL for exposed ports
+            exposed_url = self.sandbox.get_host(target_port)
+            mission.session_url = f"https://{exposed_url}"
+            mission.save()
+            
+            # Make sure the Agent knows the new local base URL
+            self.extracted_vars["LOCAL_APP_URL"] = "http://localhost:" + str(target_port)
+            
+            # Add an initial thought step so the user knows what happened
+            AgentMissionStep.objects.create(
+                mission=mission,
+                step_number=0,
+                action_type="SHELL_COMMAND",
+                thought="I have successfully cloned the repository, injected the environment variables, and started the app in the sandbox.",
+                details={"command": clone_cmd + " && " + start_cmd},
+                response_body=f"App is running locally at {self.extracted_vars['LOCAL_APP_URL']} and exposed publicly at {mission.session_url}",
+                response_status=0,
+                status="passed"
+            )
+            logger.info(f"[Agent] (WhiteBox) Server running successfully at {mission.session_url}")
+        except Exception as e:
+            logger.error(f"[Agent] (WhiteBox) Failed to get host URL: {e}")
 
     def _execute_api_call(self, action, endpoint_map):
         """Runs an API request script inside the sandbox for state persistence."""
@@ -223,6 +378,38 @@ except Exception as e:
 
         logger.info(f"[Agent] E2B Browser Action: {action.get('action')} on {action.get('url') or action.get('selector')}")
         
+        cfg = self.browser_config or {}
+        b_type = (cfg.get("browser") or "chromium").lower()
+        if b_type == "firefox":
+            browser_type_override = "browser = p.firefox.launch(headless=True)"
+        elif b_type in ["webkit", "safari"]:
+            browser_type_override = "browser = p.webkit.launch(headless=True)"
+        else:
+            browser_type_override = "browser = p.chromium.launch(headless=True)"
+            
+        context_opts = []
+        if cfg.get("device"):
+            context_opts.append(f"**p.devices['{cfg.get('device')}']")
+        if cfg.get("geolocation"):
+            geo = cfg.get('geolocation')
+            context_opts.append(f"geolocation={{'latitude': {geo.get('latitude', 0)}, 'longitude': {geo.get('longitude', 0)}}}, permissions=['geolocation']")
+            
+        context_str = ", ".join(context_opts)
+        context_launch = f"context = browser.new_context({context_str})" if context_opts else "context = browser.new_context()"
+        
+        throttle_block = ""
+        if cfg.get("network") and b_type == "chromium":
+            speed_map = {
+                "Fast_3G": "{'offline': False, 'downloadThroughput': 1.6 * 1024 * 1024 / 8, 'uploadThroughput': 750 * 1024 / 8, 'latency': 150}",
+                "Slow_3G": "{'offline': False, 'downloadThroughput': 500 * 1024 / 8, 'uploadThroughput': 500 * 1024 / 8, 'latency': 400}",
+                "Offline": "{'offline': True, 'downloadThroughput': 0, 'uploadThroughput': 0, 'latency': 0}",
+            }
+            if cfg.get("network") in speed_map:
+                throttle_block = f"""
+            client = context.new_cdp_session(page)
+            client.send('Network.emulateNetworkConditions', {speed_map[cfg.get('network')]})
+                """
+
         # We write a standalone script to the sandbox that uses its local Playwright
         script = f"""
 from playwright.sync_api import sync_playwright
@@ -231,8 +418,10 @@ import base64
 
 def run():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        {browser_type_override}
+        {context_launch}
+        page = context.new_page()
+        {throttle_block}
         
         try:
             # Action
@@ -417,6 +606,7 @@ YOUR TOOLSET:
 {"2. BROWSER_ACTION: Use this to test the UI/UX via Playwright inside the sandbox." if has_browser else ""}
 {"3. STRESS_TEST: Use this if the user wants to test performance." if has_load else ""}
 4. SHELL_COMMAND: Use this to run any CLI commands, check files, or use Linux tools.
+   - For Security Missions, use: `sqlmap`, `nmap`, `zap-cli`, `gitleaks` (for secrets in code), or `owasp-dependency-check`.
 5. MAIL_ACTION: Use this to handle OTPs and real email verification.
    - Use 'create' to get a new address.
    - Use 'get_messages' to check the inbox and find OTP codes.
@@ -440,7 +630,9 @@ INSTRUCTIONS:
 4. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY for the correct keys. 
    - If the server says "FirstName is required", look at your casing! (e.g. maybe it wants 'FirstName' instead of 'firstName').
    - Use the exact keys the server's error message suggests.
-4. MISSION COMPLETE: You successfully finish when the intent of the User Story is verified. 
+4. SAFE MODE GUARDRAILS: {"ENABLED" if self.is_safe_mode else "DISABLED"}
+   - {"Since Safe Mode is ENABLED: You are strictly forbidden from performing destructive actions (DELETE, PUT/PATCH that updates sensitive data) on PRODUCTION URLs. Only perform READ operations or safe creations." if self.is_safe_mode else "Since Safe Mode is DISABLED: You may perform destructive actions to test exploitation, but only if necessary to verify the scenario."}
+5. MISSION COMPLETE: You successfully finish when the intent of the User Story is verified. 
    - This usually means 2xx success, but if the story is a "Negative Test" (e.g., "Verify that unauthenticated users get blocked"), then a 403/401 is actually your goal!
    - Explain your result clearly in the FINISH reason.
 

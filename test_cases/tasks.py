@@ -79,7 +79,7 @@ def project_auto_pilot_task(project_id, user_id, scenarios, batch_id, user_story
         for endpoint in endpoints:
             for category in categories:
                 # 1. Billing check for AI
-                AI_COST = 5
+                AI_COST = calculate_test_cost('ai_generation')
                 context_label = f"{category.upper()}"
                 if not deduct_tokens(user, AI_COST, f"Auto-Pilot ({context_label}): {endpoint.name}"):
                     logger.warning(f"Insufficient tokens for Auto-Pilot on {endpoint.name}")
@@ -168,19 +168,28 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     # We NO LONGER iterate over runner_types directly. We pass the list to the AI
     # and let the AI decide the best runner (HTTP vs Browser) for each endpoint.
     
-    # REWRITTEN: AUTONOMOUS AGENT ENGINE (Vibe Coding)
+
     from .autonomous_agent import AutonomousAgent
-    from .models import TestCase, TestRun
+    from .models import TestCase, TestRun, AgentMission
     import json
     
     # If no story provided, use collection context or project context
     final_story = user_story or collection.user_story or collection.description or collection.project.user_story or collection.project.description or ""
     
-    # 1. Billing check for AGENT SESSION (Premium Feature)
-    AGENT_SESSION_COST = 50 
-    if not deduct_tokens(user, AGENT_SESSION_COST, f"Autonomous Agent Mission: {collection.name}"):
-        logger.warning(f"Insufficient tokens for Agent Mission on {collection.name}")
+    # 1. Billing check for AGENT SESSION (Hybrid: Entry Fee)
+    AGENT_ENTRY_COST = calculate_test_cost('agent_mission_entry') 
+    if not deduct_tokens(user, AGENT_ENTRY_COST, f"Autonomous Agent Entry: {collection.name}"):
+        logger.warning(f"Insufficient tokens for Agent Entry on {collection.name}")
         return
+
+    # 1.5 Create Agent Mission (For Live Tracking)
+    mission = AgentMission.objects.create(
+        user=user,
+        collection=collection,
+        user_story=final_story,
+        batch_id=batch_id,
+        status="pending"
+    )
 
     # 2. Initialize Agent
     project_vars = {}
@@ -194,7 +203,8 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
         scenarios=scenarios,
         categories=categories,
         layer=layer,
-        runner_types=runner_types
+        runner_types=runner_types,
+        mission_id=mission.id
     )
     
     # 3. Run The Mission (Blocking Call - The Agent thinks and acts)
@@ -332,3 +342,100 @@ def check_periodic_schedules_task():
     
     finally:
         cache.delete(lock_id)
+
+
+@shared_task(name="run_autonomous_mission", time_limit=3600) # 1 hour max for deep audits
+def run_autonomous_mission_task(mission_id, user_id):
+    """
+    Standardizes the launch of an Autonomous Agent for a specific Mission instance.
+    """
+    from .models import AgentMission, AgentMissionStep, TestCase, TestRun
+    from collection.models import Collection
+    from users.models import User
+    from .autonomous_agent import AutonomousAgent
+    import json
+    
+    user = User.objects.get(id=user_id)
+    mission = AgentMission.objects.get(id=mission_id)
+    collection = mission.collection
+    
+    # 1. Update status
+    mission.status = "running"
+    mission.save()
+    
+    # 2. Extract context
+    project = collection.project
+    project_vars = project.environment_variables or {}
+    
+    # Customize mission depth/scenarios based on mission_type
+    if mission.mission_type == "security_audit":
+        scenarios = "SECURITY, AUTH_BYPASS, INJECTION, IDOR"
+        categories = ["security"]
+    else:
+        scenarios = "HAPPY_PATH, VALIDATION_ERROR, EDGE_CASE"
+        categories = ["functional"]
+
+    # 3. Initialize Agent
+    agent = AutonomousAgent(
+        collection,
+        user_story=mission.user_story,
+        env_vars=project_vars,
+        scenarios=scenarios,
+        categories=categories,
+        layer="backend",
+        runner_types=["http", "browser"], # default to both for missions
+        mission_id=mission.id,
+        is_safe_mode=mission.is_safe_mode
+    )
+    
+    # Load browser config if any
+    if mission.browser_config:
+        agent.browser_config = mission.browser_config
+
+    # 4. Run Mission
+    try:
+        mission_depth = 40 if mission.mission_type == "security_audit" else 25
+        steps_log = agent.run_mission(max_steps=mission_depth)
+        
+        # 5. Conversion to TestRuns logic (Same as CollectionAutoPilot)
+        mission_summary = ""
+        for step in steps_log:
+            if step['action'] == 'FINISH':
+                mission_summary = step.get('reason', '')
+                continue
+            
+            if step['action'] == 'CALL_API':
+                endpoint = collection.endpoints.filter(method=step['method'], url=step['url']).first()
+                if not endpoint and step.get('url'):
+                    endpoint = collection.endpoints.filter(url__icontains=step['url']).first()
+                
+                if endpoint:
+                    test_case = TestCase.objects.create(
+                        endpoint=endpoint,
+                        name=f"{mission.get_mission_type_display()} Step: {step['endpoint']}",
+                        description=step['reason'],
+                        runner_type="http",
+                        category=categories[0],
+                        ai_generated=True,
+                        user_story=mission.user_story,
+                        assertions=[{"type": "status", "value": step['response']['status']}]
+                    )
+                    
+                    TestRun.objects.create(
+                        test_case=test_case,
+                        batch_id=mission.batch_id,
+                        status="passed" if step['status'] == "passed" else "failed",
+                        response_status=step['response']['status'],
+                        response_body=step['response']['body'],
+                        response_time_ms=step['response']['duration_ms'],
+                        logs=f"MISSION TYPE: {mission.mission_type.upper()}\nTHOUGHT: {step['reason']}\n\n{step.get('logs','')}",
+                        triggered_by="ai_agent"
+                    )
+        
+        mission.status = "completed"
+        mission.save()
+        
+    except Exception as e:
+        logger.error(f"Mission {mission_id} failed: {e}")
+        mission.status = "error"
+        mission.save()

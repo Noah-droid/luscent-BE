@@ -1,5 +1,8 @@
 from .models import Transaction
 from django.db import transaction
+import logging
+
+logger = logging.getLogger(__name__)
 
 def deduct_tokens(user, amount, description, ref_id=None):
     """
@@ -50,11 +53,17 @@ def add_tokens(user, amount, description, ref_id=None, type='PURCHASE'):
 
 def calculate_test_cost(runner_type):
     """
-    Returns the token cost for a specific runner type.
+    Returns the token cost for a specific runner type or session type.
     """
     costs = {
         'http': 1,
         'browser': 5,
-        'load': 10
+        'load': 10,
+        'agent_mission_entry': 20,
+        'security_audit_entry': 150,
+        'ai_generation': 3,
+        'shell_command': 2,
+        'mail_action': 2,
+        'vision_request': 3
     }
     return costs.get(runner_type.lower(), 1)

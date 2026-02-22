@@ -3,11 +3,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
 from django_ratelimit.decorators import ratelimit
 from collection.models import Endpoint
 from projects.models import Project
-from .models import TestCase, TestRun
-from .serializers import TestCaseSerializer, TestRunSerializer
+from .models import TestCase, TestRun, AgentMission, AgentMissionStep, AgentPrompt
+from .serializers import (
+    TestCaseSerializer, TestRunSerializer, 
+    AgentMissionSerializer, AgentMissionStepSerializer, AgentPromptSerializer
+)
 from .ai_generator import AITestGenerator
 from .runner_service import RunnerService
 from drf_yasg.utils import swagger_auto_schema
@@ -530,6 +534,7 @@ class ProjectStatusView(APIView):
         operation_description="Get project-wide test status summary",
         responses={200: "Health Summary JSON"}
     )
+    @method_decorator(cache_page(60 * 2)) # Cache for 2 mins
     def get(self, request, project_id):
         project = get_object_or_404(Project, id=project_id, user=request.user)
         
@@ -665,25 +670,97 @@ class ProjectAutoPilotView(APIView):
         import uuid
         batch_id = uuid.uuid4()
         
-   
-        from .tasks import project_auto_pilot_task
+        from .models import AgentMission
         
-        project_auto_pilot_task.delay(
-            project_id=str(project.id),
-            user_id=request.user.id,
-            scenarios=scenarios,
-            batch_id=str(batch_id),
-            user_story=user_story,
-            runner_types=runner_types,
-            categories=categories,
-            layer=layer,
-            use_visual_ai=use_visual_ai
+        # We need a collection to link to if possible
+        first_collection = project.collections.first()
+        if not first_collection:
+             return Response({"error": "Project must have at least one collection (import Swagger first)."}, status=400)
+
+        # Detect Safe Mode: True if any endpoint starts with a production URL or if explicitly requested
+        is_safe_mode = request.data.get("is_safe_mode", True)
+        
+        mission = AgentMission.objects.create(
+            user=request.user,
+            collection=first_collection,
+            user_story=user_story or f"Perform a comprehensive QA mission for {project.name}. Verify all core features.",
+            mission_type="qa_testing",
+            batch_id=batch_id,
+            browser_config=request.data.get("browser_config", {}),
+            is_safe_mode=is_safe_mode
+        )
+
+        from .tasks import run_autonomous_mission_task
+        run_autonomous_mission_task.delay(
+            mission_id=mission.id,
+            user_id=request.user.id
         )
 
         return Response({
-            "message": "Auto-Pilot started successfully",
-            "batch_id": batch_id,
-            "description": f"Generating and running tests for all endpoints in {project.name}."
+            "message": "Project Auto-Pilot Mission started.",
+            "batch_id": str(batch_id),
+            "mission_id": mission.id
+        }, status=status.HTTP_202_ACCEPTED)
+
+
+class ProjectSecurityAuditView(APIView):
+    """
+    Triggers a specialized Security Pentesting Mission for a project.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Trigger a Security Audit for an entire project",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'browser_config': openapi.Schema(type=openapi.TYPE_OBJECT, description="Optional browser configuration")
+            }
+        ),
+        responses={202: "Security Audit started"}
+    )
+    def post(self, request, project_id):
+        project = get_object_or_404(Project, id=project_id, user=request.user)
+        browser_config = request.data.get("browser_config", {})
+
+        from .tasks import HAS_CELERY
+        if not HAS_CELERY:
+            return Response({"error": "Security Audits require Celery."}, status=501)
+
+        from billing.services import calculate_test_cost
+        from billing.services import calculate_test_cost
+        SECURITY_AUDIT_ENTRY = calculate_test_cost('security_audit_entry')
+
+        if request.user.token_balance < SECURITY_AUDIT_ENTRY:
+            return Response({"error": f"Insufficient tokens for a Security Audit ({SECURITY_AUDIT_ENTRY} tokens required to start)."}, status=402)
+
+        import uuid
+        batch_id = uuid.uuid4()
+        
+        # We need a collection to link to if possible, or handle NULL in models (currently required)
+        first_collection = project.collections.first()
+        if not first_collection:
+             return Response({"error": "Project must have at least one collection (import Swagger first)."}, status=400)
+
+        from .models import AgentMission
+        mission = AgentMission.objects.create(
+            user=request.user,
+            collection=first_collection,
+            user_story=f"SECURITY AUDIT: Systematically identify vulnerabilities across {project.name}. Focus on XSS, SQLi, and Auth Bypass.",
+            mission_type="security_audit",
+            batch_id=batch_id,
+            browser_config=browser_config
+        )
+
+        from .tasks import run_autonomous_mission_task
+        run_autonomous_mission_task.delay(
+            mission_id=mission.id,
+            user_id=request.user.id
+        )
+
+        return Response({
+            "message": "Security Audit queued.",
+            "batch_id": str(batch_id)
         }, status=status.HTTP_202_ACCEPTED)
 
 
@@ -781,6 +858,7 @@ class CollectionStatusView(APIView):
         operation_description="Get collection-level test status summary",
         responses={200: "Collection Health Summary JSON"}
     )
+    @method_decorator(cache_page(60 * 1)) # Cache for 1 min
     def get(self, request, collection_id):
         from collection.models import Collection, Endpoint
         collection = get_object_or_404(Collection, id=collection_id, project__user=request.user)
@@ -866,3 +944,47 @@ class CollectionStatusView(APIView):
             },
             "endpoints": endpoint_status
         })
+
+class AgentMissionListView(generics.ListAPIView):
+    serializer_class = AgentMissionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    @method_decorator(cache_page(60 * 5)) # Cache for 5 mins
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        return AgentMission.objects.filter(user=self.request.user).order_by('-created_at')
+
+class AgentMissionDetailView(generics.RetrieveAPIView):
+    serializer_class = AgentMissionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        return AgentMission.objects.filter(user=self.request.user)
+
+    def get_object(self):
+        batch_id = self.kwargs.get("batch_id")
+        if batch_id:
+             return get_object_or_404(AgentMission, batch_id=batch_id, user=self.request.user)
+        return super().get_object()
+
+class AgentMissionPromptView(APIView):
+    """
+    Allows user to send a guidance prompt to a running mission.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, batch_id):
+        mission = get_object_or_404(AgentMission, batch_id=batch_id, user=request.user)
+        prompt_text = request.data.get("prompt")
+        
+        if not prompt_text:
+            return Response({"error": "Prompt required"}, status=400)
+            
+        prompt = AgentPrompt.objects.create(
+            mission=mission,
+            prompt=prompt_text
+        )
+        
+        return Response(AgentPromptSerializer(prompt).data, status=201)
