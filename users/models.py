@@ -1,6 +1,9 @@
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 import secrets
+from cryptography.fernet import Fernet
+from django.conf import settings
+import base64
 
 
 class User(AbstractUser):
@@ -60,3 +63,50 @@ class APIToken(models.Model):
         if not self.token:
             self.token = self.generate_token()
         super().save(*args, **kwargs)
+class TestCredential(models.Model):
+    """Global credentials for agents to use when encountering 3rd party auth"""
+    PROVIDER_CHOICES = [
+        ('google', 'Google'),
+        ('github', 'GitHub'),
+        ('email', 'Standard Email/Password'),
+        ('other', 'Other'),
+    ]
+    
+    provider = models.CharField(max_length=20, choices=PROVIDER_CHOICES)
+    email = models.EmailField()
+    password = models.CharField(max_length=255, help_text="Stored as provided. Production should use encryption.")
+    metadata = models.JSONField(default=dict, blank=True, help_text="Extra config like client_id, secret, or specific target domains")
+    description = models.TextField(blank=True, null=True, help_text="Context on where and why to use these credentials")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Global Agent Credential"
+        verbose_name_plural = "Global Agent Credentials"
+
+    def _get_fernet(self):
+        # Derive a 32-byte key from SECRET_KEY
+        key = base64.urlsafe_b64encode(settings.SECRET_KEY[:32].encode().ljust(32, b'0'))
+        return Fernet(key)
+
+    def save(self, *args, **kwargs):
+        # Encrypt password only if it looks like plain text (not already encrypted)
+        # Simple heuristic: Fernet tokens usually start with 'gAAAA'
+        if self.password and not self.password.startswith('gAAAA'):
+            f = self._get_fernet()
+            self.password = f.encrypt(self.password.encode()).decode()
+        super().save(*args, **kwargs)
+
+    @property
+    def decrypted_password(self):
+        if not self.password:
+            return ""
+        try:
+            f = self._get_fernet()
+            return f.decrypt(self.password.encode()).decode()
+        except Exception:
+            return self.password
+
+    def __str__(self):
+        return f"{self.get_provider_display()} - {self.email}"
