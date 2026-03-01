@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from .models import User, APIToken
+from .models import User, APIToken, TestCredential
 
 
 @admin.register(User)
@@ -33,3 +33,10 @@ class APITokenAdmin(admin.ModelAdmin):
     token_preview.short_description = 'Token'
 
 
+@admin.register(TestCredential)
+class TestCredentialAdmin(admin.ModelAdmin):
+    """Admin for global mission credentials"""
+    list_display = ['provider', 'email', 'is_active', 'created_at']
+    list_filter = ['provider', 'is_active', 'created_at']
+    search_fields = ['email', 'description']
+    ordering = ['provider', '-created_at']

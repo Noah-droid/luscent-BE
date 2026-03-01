@@ -511,9 +511,9 @@ class GithubReposView(APIView):
             'Accept': 'application/vnd.github.v3+json'
         }
         
-        # Simple request to get repos (public and private, limit 100 for now)
+        # Simple request to get repos (public and private)
         try:
-            resp = requests.get('https://api.github.com/user/repos?per_page=100&sort=updated', headers=headers)
+            resp = requests.get('https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member', headers=headers)
             if resp.status_code == 401:
                 # Token might be expired or revoked
                 user.github_token = None

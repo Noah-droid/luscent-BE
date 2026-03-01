@@ -581,6 +581,25 @@ run()
         except Exception as e:
             return {"error": str(e)}
 
+    def _fetch_global_credentials(self):
+        """Retrieves managed accounts for external auth from the DB."""
+        try:
+            from users.models import TestCredential
+            creds = TestCredential.objects.filter(is_active=True)
+            return [
+                {
+                    "provider": c.provider,
+                    "email": c.email,
+                    "password": c.decrypted_password,
+                    "description": c.description,
+                    "metadata": c.metadata
+                }
+                for c in creds
+            ]
+        except Exception as e:
+            logger.error(f"[Agent] Failed to fetch global creds: {e}")
+            return []
+
     def _build_system_prompt(self, endpoints):
         # Tools are enabled based on runner_types
         has_http = "http" in self.runner_types
@@ -597,6 +616,8 @@ MISSION PROFILE:
 - MISSION SCENARIOS: {self.scenarios} (Focus your thinking on these types of tests)
 
 PROJECT VARS (Auth tokens, Base URLs): {json.dumps(self.env_vars)}
+GLOBAL TEST CREDENTIALS (Use these if you encounter external/3rd-party auth screens): 
+{json.dumps(self._fetch_global_credentials(), indent=2)}
 
 AVAILABLE API ENDPOINTS:
 {json.dumps(endpoints, indent=2)}
@@ -619,6 +640,12 @@ INSTRUCTIONS:
      * For VALIDATION: Try missing fields vs malformed fields.
    - PIVOTING: Once a feature has been "stressed" with these variations, pivot to the next scenario or endpoint.
    - CRITICAL: You are NOT ALLOWED to call 'FINISH' until you have actually performed multiple tangiable actions for each mission scenario.
+    - AUTHENTICATION STRATEGY: 
+      1. FOR 3RD-PARTY AUTH (Google/GitHub/Social): Use the `GLOBAL TEST CREDENTIALS` provided. Click the social login button and type the corresponding email/password into the external screens.
+      2. FOR STANDARD EMAIL SIGNUP/LOGIN: Use the `MAIL_ACTION` tool. 
+         - Use 'create' to get a `AGENT_EMAIL` before starting the signup.
+         - Use the `MAIL_ACTION` 'get_messages' to retrieve OTPs or verification links from your inbox.
+      3. Do NOT use `MAIL_ACTION` for Google/GitHub flows unless specifically instructed.
    - OTP/VERIFICATION FLOW: If you initiate an action that sends an email (like signup or password reset), follow these steps:
      1. Use MAIL_ACTION 'create' BEFORE the signup to get a real address.
      2. Use the 'AGENT_EMAIL' variable from your memory in the API/Frontend signup.
