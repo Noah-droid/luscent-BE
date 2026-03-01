@@ -138,7 +138,7 @@ def project_auto_pilot_task(project_id, user_id, scenarios, batch_id, user_story
 
 
 @shared_task(name="collection_auto_pilot", time_limit=1800)  # 30 mins max
-def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user_story=None, runner_types=["http"], categories=["functional"], layer="backend", use_visual_ai=False):
+def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user_story=None, runner_types=["http"], categories=["functional"], layer="backend", use_visual_ai=False, mission_id=None):
     """
     Collection-level Auto-Pilot background task.
     Generates and runs tests for all endpoints in a specific collection.
@@ -182,14 +182,17 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
         logger.warning(f"Insufficient tokens for Agent Entry on {collection.name}")
         return
 
-    # 1.5 Create Agent Mission (For Live Tracking)
-    mission = AgentMission.objects.create(
-        user=user,
-        collection=collection,
-        user_story=final_story,
-        batch_id=batch_id,
-        status="pending"
-    )
+    # 1.5 Create Agent Mission (For Live Tracking) - IF NOT ALREADY CREATED BY VIEW
+    if mission_id:
+        mission = AgentMission.objects.get(id=mission_id)
+    else:
+        mission = AgentMission.objects.create(
+            user=user,
+            collection=collection,
+            user_story=final_story,
+            batch_id=batch_id,
+            status="pending"
+        )
 
     # 2. Initialize Agent
     project_vars = {}

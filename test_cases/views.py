@@ -818,9 +818,21 @@ class CollectionAutoPilotView(APIView):
         import uuid
         batch_id = uuid.uuid4()
         
+        # Create Agent Mission RECORD IMMEDIATELY (Avoids Frontend 404 while polling)
+        from .models import AgentMission
+        final_story = user_story or collection.user_story or collection.description or collection.project.user_story or collection.project.description or ""
+        
+        mission = AgentMission.objects.create(
+            user=request.user,
+            collection=collection,
+            user_story=final_story,
+            batch_id=str(batch_id),
+            status="pending"
+        )
+
         from .tasks import collection_auto_pilot_task
         
-        logger.info(f"[CollectionAutoPilotView] Triggering task for collection {collection_id} with batch_id {batch_id}")
+        logger.info(f"[CollectionAutoPilotView] Triggering task for mission {mission.id} with batch_id {batch_id}")
         
         try:
             task = collection_auto_pilot_task.delay(
@@ -832,7 +844,8 @@ class CollectionAutoPilotView(APIView):
                 runner_types=runner_types,
                 categories=categories,
                 layer=layer,
-                use_visual_ai=use_visual_ai
+                use_visual_ai=use_visual_ai,
+                mission_id=mission.id # Pass mission explicitly
             )
             logger.info(f"[CollectionAutoPilotView] Task {task.id} queued successfully")
         except Exception as e:
