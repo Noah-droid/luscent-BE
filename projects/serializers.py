@@ -16,7 +16,6 @@ class ProjectSerializer(serializers.ModelSerializer):
             "repo_url",
             "repo_branch",
             "repo_type",
-            "target_url",
             "test_runs_count",
             "storage_used_bytes",
             "storage_quota_bytes",
@@ -26,24 +25,8 @@ class ProjectSerializer(serializers.ModelSerializer):
 
         extra_kwargs = {
             'environment_variables': {'required': False},
-            'target_url': {'write_only': True, 'required': False},
         }
         read_only_fields = ["id", "created_at", "updated_at"]
-
-    def create(self, validated_data):
-        target_url = validated_data.pop('target_url', None)
-        project = super().create(validated_data)
-        
-        # If target_url is provided, create a default collection
-        if target_url:
-            from collection.models import Collection
-            Collection.objects.create(
-                project=project,
-                name="Default",
-                base_url=target_url,
-                description=f"Auto-generated collection for {project.name}"
-            )
-        return project
 
     def get_test_runs_count(self, obj):
         from test_cases.models import TestRun
