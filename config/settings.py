@@ -232,15 +232,25 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_IMPORTS = ('test_cases.tasks', 'collection.tasks')
 
 # Cache Configuration
-CACHES = {
-    "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": config('CELERY_BROKER_URL', default='redis://localhost:6379/0'),
-        "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+REDIS_URL = config('REDIS_URL', default=config('CELERY_BROKER_URL', default=None))
+
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": REDIS_URL,
+            "OPTIONS": {
+                "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            }
         }
     }
-}
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "unique-snowflake",
+        }
+    }
 
 # CELERY_BEAT_SCHEDULE = {
 #     'check-periodic-test-schedules': {
