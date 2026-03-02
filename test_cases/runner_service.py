@@ -499,10 +499,10 @@ class RunnerService:
                     sb = Sandbox.connect(sandbox_id, api_key=api_key)
                 except Exception as e:
                     logger.warning(f"[E2B] Could not connect to sandbox {sandbox_id}, creating new one. Error: {e}")
-                    sb = Sandbox(template=template, api_key=api_key)
+                    sb = Sandbox.create(template=template, api_key=api_key)
             else:
                 logger.info(f"[E2B] Creating new sandbox with template: {template}")
-                sb = Sandbox(template=template, api_key=api_key)
+                sb = Sandbox.create(template=template, api_key=api_key)
 
             # Update test_run with the sandbox_id so future tests in batch can find it
             if test_run:
