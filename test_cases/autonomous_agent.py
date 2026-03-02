@@ -95,7 +95,7 @@ class AutonomousAgent:
         else:
             try:
                 logger.info(f"[Agent] Spawning sandbox environment: {self.sandbox_template}")
-                self.sandbox = Sandbox(template=self.sandbox_template, api_key=self.e2b_api_key)
+                self.sandbox = Sandbox.create(template=self.sandbox_template, api_key=self.e2b_api_key)
                 
                 # If we have a repo linked, set it up immediately
                 if mission and mission.collection.project.repo_url:
