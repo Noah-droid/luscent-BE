@@ -962,10 +962,7 @@ class AgentMissionListView(generics.ListAPIView):
     serializer_class = AgentMissionSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    @method_decorator(cache_page(60 * 5)) # Cache for 5 mins
-    def get(self, request, *args, **kwargs):
-        return super().get(request, *args, **kwargs)
-
+    # No caching - missions update frequently and we need fresh status
     def get_queryset(self):
         return AgentMission.objects.filter(user=self.request.user).order_by('-created_at')
 
