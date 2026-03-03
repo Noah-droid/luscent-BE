@@ -794,11 +794,15 @@ class CollectionAutoPilotView(APIView):
         scenarios = request.data.get("scenarios", ["HAPPY_PATH", "VALIDATION_ERROR", "SECURITY"])
         user_story = request.data.get("user_story", "")
         
-        # Parse lists directly, fallback to single legacy keys if needed
+        # Parse lists directly, fallback to collection defaults based on source
         runner_types = request.data.get("runner_types", [])
         if not runner_types:
-             single = request.data.get("runner_type", "http")
-             runner_types = [single]
+             # Default runner_type based on collection source
+             if collection.source in ['browser', 'crawler']:
+                 runner_types = ['browser', 'http']
+             else:
+                 single = request.data.get("runner_type", "http")
+                 runner_types = [single]
 
         categories = request.data.get("categories", [])
         if not categories:
