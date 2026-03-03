@@ -24,6 +24,7 @@ class AutonomousAgent:
         self.is_safe_mode = is_safe_mode
         self.user_story = user_story or "Explore the API and ensure core functionality works."
         self.env_vars = env_vars or {}
+        self.browser_process = None # Persistent browser process for live view
         
         # Mission Context (Determines the agent's focus)
         self.scenarios = scenarios or "HAPPY_PATH"
@@ -102,9 +103,24 @@ class AutonomousAgent:
                 logger.info(f"[Agent] Spawning sandbox environment: {self.sandbox_template}")
                 self.sandbox = Sandbox.create(template=self.sandbox_template, api_key=self.e2b_api_key)
                 
+                # Detect Live View (VNC) URL for Desktop templates
+                if mission:
+                    try:
+                        # Many E2B GUI templates expose noVNC on port 80
+                        vnc_host = self.sandbox.get_host(80)
+                        mission.session_url = f"https://{vnc_host}"
+                        mission.save()
+                        logger.info(f"[Agent] Live View URL mapped: {mission.session_url}")
+                    except:
+                        pass
+
                 # If we have a repo linked, set it up immediately
                 if mission and mission.collection.project.repo_url:
                     self._execute_whitebox_setup(mission.collection.project, mission)
+                
+                # Initialize persistent browser if needed
+                if "browser" in self.runner_types:
+                    self._init_browser_manager()
                 
             except Exception as e:
                 logger.error(f"[Agent] Failed to spawn sandbox: {e}")
@@ -376,15 +392,108 @@ except Exception as e:
             import execjs # or similar, but let's just stick to the sandbox-first approach
             return {"error": "Native execution failed. Sandbox required."}
 
-    def _execute_browser_action(self, action):
-        """Executes a Playwright script inside the E2B Sandbox."""
+    def _init_browser_manager(self):
+        """Starts a persistent Playwright process in the sandbox for live view."""
         if not self.sandbox:
-            return {"error": "Sandbox not available for browser actions."}
+            return
 
-        logger.info(f"[Agent] E2B Browser Action: {action.get('action')} on {action.get('url') or action.get('selector')}")
+        script = """
+import json
+import base64
+import sys
+import os
+from playwright.sync_api import sync_playwright
+
+def run():
+    with sync_playwright() as p:
+        # Launch headed for VNC support
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context()
+        page = context.new_page()
         
+        # Signal ready
+        print("READY", flush=True)
+        
+        for line in sys.stdin:
+            if not line.strip(): continue
+            try:
+                action = json.loads(line)
+                action_type = action.get('action')
+                
+                if action_type == 'navigate':
+                    page.goto(action.get('url'))
+                elif action_type == 'click':
+                    page.click(action.get('selector'))
+                elif action_type == 'type':
+                    page.fill(action.get('selector'), str(action.get('value')))
+                
+                page.wait_for_timeout(1000)
+                
+                # Capture result
+                screenshot = base64.b64encode(page.screenshot()).decode('utf-8')
+                print(json.dumps({
+                    "status": "success",
+                    "title": page.title(),
+                    "screenshot_b64": screenshot,
+                    "html_preview": page.content()[:500]
+                }), flush=True)
+            except Exception as e:
+                print(json.dumps({"error": str(e)}), flush=True)
+        browser.close()
+
+if __name__ == "__main__":
+    run()
+"""
+        try:
+            self.sandbox.files.write("/home/user/browser_manager.py", script)
+            # Start persistent process
+            self.browser_process = self.sandbox.commands.run(
+                "python3 -u /home/user/browser_manager.py", 
+                wait=False
+            )
+            # Wait for READY signal
+            for line in self.browser_process.stdout:
+                if "READY" in line:
+                    logger.info("[Agent] Persistent browser manager is READY.")
+                    break
+        except Exception as e:
+            logger.error(f"[Agent] Failed to start browser manager: {e}")
+
+    def _execute_browser_action(self, action):
+        """Sends an action to the persistent browser manager."""
+        if not self.browser_process:
+            # Fallback to old ephemeral method if persistent manager failed
+            return self._execute_browser_action_legacy(action)
+
+        try:
+            curr_action = {
+                "action": action.get("action"),
+                "url": action.get("url"),
+                "selector": action.get("selector"),
+                "value": action.get("value")
+            }
+            # Send action as JSON line
+            self.browser_process.send_input(json.dumps(curr_action) + "\n")
+            
+            # Read response (one line of JSON)
+            for line in self.browser_process.stdout:
+                if line.strip():
+                    res = json.loads(line)
+                    # Post-process: Vision
+                    if res.get("screenshot_b64"):
+                        res["visual_observation"] = self._analyze_vision(res["screenshot_b64"])
+                        del res["screenshot_b64"]
+                    return res
+        except Exception as e:
+            logger.error(f"[Agent] Error in persistent browser action: {e}")
+            return {"error": str(e)}
+
+    def _execute_browser_action_legacy(self, action):
+        """Original ephemeral browser execution (Fallback)."""
+        logger.info(f"[Agent] Using Legacy Ephemeral Browser for: {action.get('action')}")
         cfg = self.browser_config or {}
         b_type = (cfg.get("browser") or "chromium").lower()
+        
         if b_type == "firefox":
             browser_type_override = "browser = p.firefox.launch(headless=True)"
         elif b_type in ["webkit", "safari"]:
@@ -415,7 +524,6 @@ except Exception as e:
             client.send('Network.emulateNetworkConditions', {speed_map[cfg.get('network')]})
                 """
 
-        # We write a standalone script to the sandbox that uses its local Playwright
         script = f"""
 from playwright.sync_api import sync_playwright
 import json
@@ -457,12 +565,9 @@ def run():
 run()
 """
         res = self._run_in_sandbox_or_host(script)
-        
-        # Post-process: Analyze with Vision if we got a screenshot
         if res.get("screenshot_b64"):
             res["visual_observation"] = self._analyze_vision(res["screenshot_b64"])
-            del res["screenshot_b64"] # Clean up the memory
-            
+            del res["screenshot_b64"]
         return res
 
     def _analyze_vision(self, b64_image):
