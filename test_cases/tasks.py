@@ -232,38 +232,51 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
                 mission_summary = step.get('reason', '')
                 continue
 
-            if step['action'] == 'CALL_API':
-                # ... (Endpoint lookup)
-                endpoint = collection.endpoints.filter(method=step['method'], url=step['url']).first()
-                if not endpoint:
+            # Log everything except FINISH
+            if step['action'] in ['CALL_API', 'BROWSER_ACTION', 'SHELL_COMMAND', 'MAIL_ACTION']:
+                # Find matching endpoint or fallback to first in collection
+                endpoint = collection.endpoints.filter(method=step.get('method', 'GET'), url=step.get('url', '')).first()
+                if not endpoint and step.get('url'):
                     endpoint = collection.endpoints.filter(url__icontains=step['url']).first()
                 
+                # If still no endpoint, pick ANY endpoint in the collection as a container
+                if not endpoint:
+                    endpoint = collection.endpoints.first()
+                
+                if not endpoint:
+                    # If collection is truly empty, we can't create a TestCase (non-nullable endpoint)
+                    # For now, skip logging this specific step as a TestRun if collection is empty
+                    continue
+
                 # Create a "Record" of what the agent did
                 test_case = TestCase.objects.create(
                     endpoint=endpoint,
-                    name=f"Step {step['step']}: {step['endpoint']}",
-                    description=f"Action: {step['reason']}",
-                    runner_type="http",
+                    name=f"Step {step['step']}: {step.get('endpoint', step['action'])}",
+                    description=f"Action Reason: {step['reason']}",
+                    runner_type="browser" if step['action'] == 'BROWSER_ACTION' else "http",
                     category=categories[0] if isinstance(categories, list) and categories else "functional", 
                     layer=layer,
                     tags=[f"SCENARIO:{s}" for s in scenarios.split(',')] if isinstance(scenarios, str) else [f"SCENARIO:{scenarios}"],
                     ai_generated=True,
                     user_story=final_story,
-                    assertions=[{"type": "status", "value": step['response']['status']}]
+                    assertions=[{"type": "status", "value": step.get('response', {}).get('status', 200)}] if 'response' in step else []
                 )
                 
-                # Append the Master Summary to the primary/first run for notification extractor
-                final_logs = f"AI THOUGHT: {step['reason']}\n\nREQUEST:\n{json.dumps(step['request'], indent=2)}\n\nRESPONSE:\n{step['response']['body']}"
+                # Build Logs
+                req_info = json.dumps(step.get('request', {}), indent=2)
+                resp_info = step.get('response', {}).get('body', '') if 'response' in step else ''
+                
+                final_logs = f"AI THOUGHT: {step['reason']}\n\nACTION TYPE: {step['action']}\n\nREQUEST/DETAILS:\n{req_info}\n\nRESPONSE:\n{resp_info}"
                 if mission_summary:
                     final_logs = f"MISSION_SUMMARY: {mission_summary}\n\n" + final_logs
 
                 TestRun.objects.create(
                     test_case=test_case,
                     batch_id=batch_id,
-                    status="passed" if step['status'] == "passed" else "failed",
-                    response_status=step['response']['status'],
-                    response_body=step['response']['body'],
-                    response_time_ms=step['response']['duration_ms'],
+                    status="passed" if step.get('status', 'passed') == "passed" else "failed",
+                    response_status=step.get('response', {}).get('status') if 'response' in step else None,
+                    response_body=step.get('response', {}).get('body') if 'response' in step else step.get('error'),
+                    response_time_ms=step.get('response', {}).get('duration_ms', 0) if 'response' in step else 0,
                     logs=final_logs,
                     triggered_by="ai_agent"
                 )
@@ -273,6 +286,35 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
             mission.status = "error"
             mission.error_message = f"Critical Failure: {str(e)}"
             mission.save()
+            
+            # Create a failure record in TestRun for visibility
+            try:
+                # Ensure at least one endpoint exists
+                endpoint = collection.endpoints.first()
+                if not endpoint:
+                    endpoint = Endpoint.objects.create(
+                        collection=collection,
+                        name="Agent Target Root",
+                        method="GET",
+                        url="/"
+                    )
+                
+                test_case = TestCase.objects.create(
+                    endpoint=endpoint,
+                    name="Critical Agent Failure",
+                    description=f"Mission terminated due to error: {str(e)}",
+                    ai_generated=True,
+                    category="functional"
+                )
+                TestRun.objects.create(
+                    test_case=test_case,
+                    batch_id=batch_id,
+                    status="error",
+                    error_message=str(e),
+                    triggered_by="ai_agent"
+                )
+            except Exception as inner_e:
+                logger.error(f"Failed to log mission failure to TestRun: {inner_e}")
         return
     
     # Schedule batch report
@@ -429,30 +471,33 @@ def run_autonomous_mission_task(mission_id, user_id):
                 mission_summary = step.get('reason', '')
                 continue
             
-            if step['action'] == 'CALL_API':
-                endpoint = collection.endpoints.filter(method=step['method'], url=step['url']).first()
+            if step['action'] in ['CALL_API', 'BROWSER_ACTION', 'SHELL_COMMAND', 'MAIL_ACTION']:
+                endpoint = collection.endpoints.filter(method=step.get('method', 'GET'), url=step.get('url', '')).first()
                 if not endpoint and step.get('url'):
                     endpoint = collection.endpoints.filter(url__icontains=step['url']).first()
+                
+                if not endpoint:
+                    endpoint = collection.endpoints.first()
                 
                 if endpoint:
                     test_case = TestCase.objects.create(
                         endpoint=endpoint,
-                        name=f"{mission.get_mission_type_display()} Step: {step['endpoint']}",
+                        name=f"{mission.get_mission_type_display()} Step: {step.get('endpoint', step['action'])}",
                         description=step['reason'],
-                        runner_type="http",
+                        runner_type="browser" if step['action'] == 'BROWSER_ACTION' else "http",
                         category=categories[0],
                         ai_generated=True,
                         user_story=mission.user_story,
-                        assertions=[{"type": "status", "value": step['response']['status']}]
+                        assertions=[{"type": "status", "value": step.get('response', {}).get('status', 200)}] if 'response' in step else []
                     )
                     
                     TestRun.objects.create(
                         test_case=test_case,
                         batch_id=mission.batch_id,
-                        status="passed" if step['status'] == "passed" else "failed",
-                        response_status=step['response']['status'],
-                        response_body=step['response']['body'],
-                        response_time_ms=step['response']['duration_ms'],
+                        status="passed" if step.get('status', 'passed') == "passed" else "failed",
+                        response_status=step.get('response', {}).get('status') if 'response' in step else None,
+                        response_body=step.get('response', {}).get('body') if 'response' in step else step.get('error'),
+                        response_time_ms=step.get('response', {}).get('duration_ms', 0) if 'response' in step else 0,
                         logs=f"MISSION TYPE: {mission.mission_type.upper()}\nTHOUGHT: {step['reason']}\n\n{step.get('logs','')}",
                         triggered_by="ai_agent"
                     )
@@ -460,8 +505,41 @@ def run_autonomous_mission_task(mission_id, user_id):
         mission.status = "completed"
         mission.save()
         
+        # Schedule batch report
+        from .tasks import send_batch_report_task
+        send_batch_report_task.apply_async((str(mission.batch_id), user.id), countdown=60)
+        
     except Exception as e:
         logger.error(f"Mission {mission_id} failed: {e}")
         mission.status = "error"
         mission.error_message = f"Critical Failure: {str(e)}"
         mission.save()
+
+        # Create a failure record in TestRun for visibility
+        try:
+            from collection.models import Endpoint
+            endpoint = collection.endpoints.first()
+            if not endpoint:
+                endpoint = Endpoint.objects.create(
+                    collection=collection,
+                    name="Agent Target Root",
+                    method="GET",
+                    url="/"
+                )
+            
+            test_case = TestCase.objects.create(
+                endpoint=endpoint,
+                name="Critical Mission Crash",
+                description=f"Mission terminated: {str(e)}",
+                ai_generated=True,
+                category="security" if mission.mission_type == "security_audit" else "functional"
+            )
+            TestRun.objects.create(
+                test_case=test_case,
+                batch_id=mission.batch_id,
+                status="error",
+                error_message=str(e),
+                triggered_by="ai_agent"
+            )
+        except Exception as inner_e:
+            logger.error(f"Failed to log mission crash to TestRun: {inner_e}")
