@@ -19,6 +19,7 @@ class Collection(models.Model):
         ("swagger", "Swagger"),
         ("postman", "Postman"),
         ("crawler", "Crawler"),
+        ("browser", "Browser"),
     ]
     source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default="manual")
     
