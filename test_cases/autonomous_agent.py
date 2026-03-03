@@ -118,8 +118,9 @@ class AutonomousAgent:
                 if mission and mission.collection.project.repo_url:
                     self._execute_whitebox_setup(mission.collection.project, mission)
                 
-                # Initialize persistent browser if needed
+                # Ensure playwright binaries are present
                 if "browser" in self.runner_types:
+                    self._ensure_playwright_browsers()
                     self._init_browser_manager()
                 
             except Exception as e:
@@ -254,7 +255,7 @@ class AutonomousAgent:
         finally:
             if self.sandbox:
                 logger.info(f"[Agent] Closing sandbox: {self.sandbox.sandbox_id}")
-                self.sandbox.close()
+                self.sandbox.kill()
 
         return steps_log
 
@@ -614,6 +615,25 @@ run()
         except Exception as e:
             logger.error(f"Vision Analysis Failed: {e}")
             return "Vision system unavailable, relying on HTML observation."
+    def _ensure_playwright_browsers(self):
+        """Verifies and installs playwright binaries if missing."""
+        if not self.sandbox:
+            return
+            
+        logger.info("[Agent] Verifying Playwright binaries in sandbox...")
+        # Check if chromium exists in the usual cache path
+        # If playwright was updated, the path might have changed, so we just run install if needed
+        check_cmd = "python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); p.chromium.launch(headless=True).close(); p.stop()'"
+        res = self.sandbox.commands.run(check_cmd)
+        
+        if res.exit_code != 0:
+            logger.warning("[Agent] Playwright binaries missing or incompatible. Installing Chromium...")
+            # We only install chromium to save time/space
+            self.sandbox.commands.run("playwright install chromium")
+            logger.info("[Agent] Playwright installation complete.")
+        else:
+            logger.info("[Agent] Playwright binaries verified.")
+
 
     def _execute_stress_test(self, action, endpoint_map):
         """Executes a Locust load test inside the E2B Sandbox."""
