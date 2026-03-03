@@ -195,6 +195,9 @@ class AutonomousAgent:
                     success = deduct_tokens(user, step_cost, f"Agent Step {step_i}: {action_type}", ref_id=mission.id)
                     if not success:
                         logger.error(f"[Agent] Insufficient tokens for step {step_i}. Mission aborted.")
+                        mission.status = "error"
+                        mission.error_message = f"Insufficient tokens for Step {step_i} ({action_type}). Cost: {step_cost}. Balance too low."
+                        mission.save()
                         self._record_observation("Error: Out of tokens. Mission ending.")
                         break
 
