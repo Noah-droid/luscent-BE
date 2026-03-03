@@ -83,6 +83,8 @@ def project_auto_pilot_task(project_id, user_id, scenarios, batch_id, user_story
                 context_label = f"{category.upper()}"
                 if not deduct_tokens(user, AI_COST, f"Auto-Pilot ({context_label}): {endpoint.name}"):
                     logger.warning(f"Insufficient tokens for Auto-Pilot on {endpoint.name}")
+                    # If we had a mission, we'd error it, but project auto-pilot is a generator.
+                    # We can at least log it.
                     continue
     
                 # 2. Call AI with allowed_runners list
@@ -176,12 +178,6 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     # If no story provided, use collection context or project context
     final_story = user_story or collection.user_story or collection.description or collection.project.user_story or collection.project.description or ""
     
-    # 1. Billing check for AGENT SESSION (Hybrid: Entry Fee)
-    AGENT_ENTRY_COST = calculate_test_cost('agent_mission_entry') 
-    if not deduct_tokens(user, AGENT_ENTRY_COST, f"Autonomous Agent Entry: {collection.name}"):
-        logger.warning(f"Insufficient tokens for Agent Entry on {collection.name}")
-        return
-
     # 1.5 Create Agent Mission (For Live Tracking) - IF NOT ALREADY CREATED BY VIEW
     if mission_id:
         mission = AgentMission.objects.get(id=mission_id)
@@ -193,6 +189,15 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
             batch_id=batch_id,
             status="pending"
         )
+
+    # 1. Billing check for AGENT SESSION (Hybrid: Entry Fee)
+    AGENT_ENTRY_COST = calculate_test_cost('agent_mission_entry') 
+    if not deduct_tokens(user, AGENT_ENTRY_COST, f"Autonomous Agent Entry: {collection.name}"):
+        logger.warning(f"Insufficient tokens for Agent Entry on {collection.name}")
+        mission.status = "error"
+        mission.error_message = f"Insufficient tokens. Required: {AGENT_ENTRY_COST}. Mission aborted."
+        mission.save()
+        return
 
     # 2. Initialize Agent
     project_vars = {}
@@ -264,6 +269,10 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
                 )
     except Exception as e:
         logger.error(f"[CollectionAutoPilot] Agent Mission Failed: {e}")
+        if mission:
+            mission.status = "error"
+            mission.error_message = f"Critical Failure: {str(e)}"
+            mission.save()
         return
     
     # Schedule batch report
@@ -366,6 +375,19 @@ def run_autonomous_mission_task(mission_id, user_id):
     mission.status = "running"
     mission.save()
     
+    from billing.services import deduct_tokens, calculate_test_cost
+    
+    # Billing check
+    entry_cost_key = 'security_audit_entry' if mission.mission_type == "security_audit" else 'agent_mission_entry'
+    entry_cost = calculate_test_cost(entry_cost_key)
+    
+    if not deduct_tokens(user, entry_cost, f"{mission.get_mission_type_display()}: {mission.collection.project.name}"):
+        logger.warning(f"Insufficient tokens for mission {mission.id}")
+        mission.status = "error"
+        mission.error_message = f"Insufficient tokens for {mission.get_mission_type_display()}. Required: {entry_cost}."
+        mission.save()
+        return
+
     # 2. Extract context
     project = collection.project
     project_vars = project.environment_variables or {}
@@ -441,4 +463,5 @@ def run_autonomous_mission_task(mission_id, user_id):
     except Exception as e:
         logger.error(f"Mission {mission_id} failed: {e}")
         mission.status = "error"
+        mission.error_message = f"Critical Failure: {str(e)}"
         mission.save()

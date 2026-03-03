@@ -664,8 +664,10 @@ class ProjectAutoPilotView(APIView):
             return Response({"error": "Auto-Pilot requires Celery for background processing."}, status=501)
 
         # Billing: Upfront check
-        if request.user.token_balance <= 0:
-            return Response({"error": "You have no tokens available. Please top up your balance to use Auto-Pilot."}, status=402)
+        from billing.services import calculate_test_cost
+        AGENT_ENTRY_COST = calculate_test_cost('agent_mission_entry')
+        if request.user.token_balance < AGENT_ENTRY_COST:
+            return Response({"error": f"Insufficient tokens for Auto-Pilot. Required: {AGENT_ENTRY_COST}, Balance: {request.user.token_balance}."}, status=402)
 
         import uuid
         batch_id = uuid.uuid4()
@@ -727,7 +729,6 @@ class ProjectSecurityAuditView(APIView):
         if not HAS_CELERY:
             return Response({"error": "Security Audits require Celery."}, status=501)
 
-        from billing.services import calculate_test_cost
         from billing.services import calculate_test_cost
         SECURITY_AUDIT_ENTRY = calculate_test_cost('security_audit_entry')
 
@@ -816,8 +817,10 @@ class CollectionAutoPilotView(APIView):
             return Response({"error": "Auto-Pilot requires Celery for background processing."}, status=501)
 
         # Billing: Upfront check
-        if request.user.token_balance <= 0:
-            return Response({"error": "You have no tokens available. Please top up your balance to use Auto-Pilot."}, status=402)
+        from billing.services import calculate_test_cost
+        AGENT_ENTRY_COST = calculate_test_cost('agent_mission_entry')
+        if request.user.token_balance < AGENT_ENTRY_COST:
+            return Response({"error": f"Insufficient tokens for Auto-Pilot. Required: {AGENT_ENTRY_COST}, Balance: {request.user.token_balance}."}, status=402)
 
         import uuid
         batch_id = uuid.uuid4()
