@@ -29,7 +29,12 @@ class AutonomousAgent:
         self.scenarios = scenarios or "HAPPY_PATH"
         self.categories = categories or ["functional"]
         self.layer = layer
-        self.runner_types = runner_types or ["http"]
+        self.runner_types = runner_types
+        if not self.runner_types:
+            if self.collection.source in ['browser', 'crawler']:
+                self.runner_types = ["http", "browser"]
+            else:
+                self.runner_types = ["http"]
         
         # LLM Config
         self.provider = getattr(settings, 'LLM_PROVIDER', 'gemini').lower() 
@@ -605,6 +610,8 @@ run()
         has_http = "http" in self.runner_types
         has_browser = "browser" in self.runner_types
         has_load = "load" in self.runner_types
+        
+        creds = self._fetch_global_credentials()
 
         return f"""
 You are an Universal Autonomous QA Agent. You have the "Vibe" of a senior human tester.
@@ -615,12 +622,15 @@ MISSION PROFILE:
 - TARGET LAYER: {self.layer}
 - MISSION SCENARIOS: {self.scenarios} (Focus your thinking on these types of tests)
 
-PROJECT VARS (Auth tokens, Base URLs): {json.dumps(self.env_vars)}
+TARGET ENVIRONMENT:
+- BASE URL: {self.collection.base_url or "None provided"}
+- PROJECT VARS: {json.dumps(self.env_vars)}
+
 GLOBAL TEST CREDENTIALS (Use these if you encounter external/3rd-party auth screens): 
-{json.dumps(self._fetch_global_credentials(), indent=2)}
+{json.dumps(creds, indent=2)}
 
 AVAILABLE API ENDPOINTS:
-{json.dumps(endpoints, indent=2)}
+{json.dumps(endpoints, indent=2) if endpoints else "None provided - Use BROWSER_ACTION or SHELL_COMMAND to explore the target URL directly."}
 
 YOUR TOOLSET:
 {"1. CALL_API: Use this for functional backend testing. Runs inside the sandbox." if has_http else ""}
@@ -657,6 +667,7 @@ INSTRUCTIONS:
 4. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY for the correct keys. 
    - If the server says "FirstName is required", look at your casing! (e.g. maybe it wants 'FirstName' instead of 'firstName').
    - Use the exact keys the server's error message suggests.
+6. UI EXPLORATION: If 'AVAILABLE API ENDPOINTS' is empty but you have a 'BASE URL', start by using BROWSER_ACTION 'navigate' to the BASE URL to discover the application.
 4. SAFE MODE GUARDRAILS: {"ENABLED" if self.is_safe_mode else "DISABLED"}
    - {"Since Safe Mode is ENABLED: You are strictly forbidden from performing destructive actions (DELETE, PUT/PATCH that updates sensitive data) on PRODUCTION URLs. Only perform READ operations or safe creations." if self.is_safe_mode else "Since Safe Mode is DISABLED: You may perform destructive actions to test exploitation, but only if necessary to verify the scenario."}
 5. MISSION COMPLETE: You successfully finish when the intent of the User Story is verified. 
