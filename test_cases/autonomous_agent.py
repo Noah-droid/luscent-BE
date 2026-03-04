@@ -282,13 +282,18 @@ class AutonomousAgent:
         env_mapping["NODE_ENV"] = "development"
         
         # 3. Determine Start Command and Port based on repo_type
-        # Defaulting to standard frontend (npm run dev) on port 3000
-        start_cmd = "npm install --legacy-peer-deps && npm run dev"
-        target_port = 3000
-        
+        # Install dependencies SYNCHRONOUSLY to avoid race conditions with agent tools
         if project.repo_type == "backend":
             target_port = 8000
-            start_cmd = "pip install -r requirements.txt && python manage.py runserver 0.0.0.0:8000"
+            logger.info("[Agent] (WhiteBox) Installing backend dependencies (pip)...")
+            # We use --upgrade to ensure we have the latest compatible versions if requested
+            self.sandbox.commands.run("pip install --upgrade -r requirements.txt", cwd="/app/source", envs=env_mapping)
+            start_cmd = "python manage.py runserver 0.0.0.0:8000"
+        else:
+            target_port = 3000
+            logger.info("[Agent] (WhiteBox) Installing frontend dependencies (npm)...")
+            self.sandbox.commands.run("npm install --legacy-peer-deps", cwd="/app/source", envs=env_mapping)
+            start_cmd = "npm run dev"
             
         logger.info(f"[Agent] (WhiteBox) Starting server via: {start_cmd}")
         
@@ -616,23 +621,23 @@ run()
             logger.error(f"Vision Analysis Failed: {e}")
             return "Vision system unavailable, relying on HTML observation."
     def _ensure_playwright_browsers(self):
-        """Verifies and installs playwright binaries if missing."""
+        """Verifies and installs playwright binaries if missing or incompatible."""
         if not self.sandbox:
             return
             
         logger.info("[Agent] Verifying Playwright binaries in sandbox...")
-        # Check if chromium exists in the usual cache path
-        # If playwright was updated, the path might have changed, so we just run install if needed
+        # Check if chromium can launch. If playwright was updated via pip, this will fail if binaries are old.
         check_cmd = "python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); p.chromium.launch(headless=True).close(); p.stop()'"
         res = self.sandbox.commands.run(check_cmd)
         
         if res.exit_code != 0:
-            logger.warning("[Agent] Playwright binaries missing or incompatible. Installing Chromium...")
-            # We only install chromium to save time/space
+            logger.warning(f"[Agent] Playwright binaries missing/incompatible (Error: {res.stderr}). Re-installing...")
+            # Install chromium AND its dependencies (required if the new playwright version depends on newer system libs)
             self.sandbox.commands.run("playwright install chromium")
-            logger.info("[Agent] Playwright installation complete.")
+            self.sandbox.commands.run("playwright install-deps chromium")
+            logger.info("[Agent] Playwright installation and dependency setup complete.")
         else:
-            logger.info("[Agent] Playwright binaries verified.")
+            logger.info("[Agent] Playwright binaries verified and working.")
 
 
     def _execute_stress_test(self, action, endpoint_map):
