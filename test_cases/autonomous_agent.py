@@ -117,10 +117,8 @@ class AutonomousAgent:
                 # If we have a repo linked, set it up immediately
                 if mission and mission.collection.project.repo_url:
                     self._execute_whitebox_setup(mission.collection.project, mission)
-                
                 # Ensure playwright binaries are present
                 if "browser" in self.runner_types:
-                    self._ensure_playwright_browsers()
                     self._init_browser_manager()
                 
             except Exception as e:
@@ -129,6 +127,9 @@ class AutonomousAgent:
         system_prompt = self._build_system_prompt(endpoints)
         self.history.append({"role": "system", "content": system_prompt})
         
+        # Playwright verification state
+        self._playwright_verified = False
+
         steps_log = []
         correction_count = 0
 
@@ -406,7 +407,10 @@ except Exception as e:
         if not self.sandbox:
             return
 
-        script = """
+        cfg = self.browser_config or {}
+        is_headless = cfg.get("headless", False) # Default to headful for VNC unless overridden
+
+        script = f"""
 import json
 import base64
 import sys
@@ -415,8 +419,8 @@ from playwright.sync_api import sync_playwright
 
 def run():
     with sync_playwright() as p:
-        # Launch headed for VNC support
-        browser = p.chromium.launch(headless=False)
+        # Launch using config
+        browser = p.chromium.launch(headless={is_headless})
         context = browser.new_context()
         page = context.new_page()
         
@@ -470,7 +474,16 @@ if __name__ == "__main__":
 
     def _execute_browser_action(self, action):
         """Sends an action to the persistent browser manager."""
-        if not self.browser_process:
+        # Verify and install playwright binary dependencies exactly before first use
+        if not getattr(self, '_playwright_verified', False):
+            self._ensure_playwright_browsers()
+            self._playwright_verified = True
+            
+        # Ensure browser manager is active
+        if not getattr(self, 'browser_process', None):
+            self._init_browser_manager()
+
+        if not getattr(self, 'browser_process', None):
             # Fallback to old ephemeral method if persistent manager failed
             return self._execute_browser_action_legacy(action)
 
@@ -503,12 +516,14 @@ if __name__ == "__main__":
         cfg = self.browser_config or {}
         b_type = (cfg.get("browser") or "chromium").lower()
         
+        is_headless = cfg.get("headless", True)
+        
         if b_type == "firefox":
-            browser_type_override = "browser = p.firefox.launch(headless=True)"
+            browser_type_override = f"browser = p.firefox.launch(headless={is_headless})"
         elif b_type in ["webkit", "safari"]:
-            browser_type_override = "browser = p.webkit.launch(headless=True)"
+            browser_type_override = f"browser = p.webkit.launch(headless={is_headless})"
         else:
-            browser_type_override = "browser = p.chromium.launch(headless=True)"
+            browser_type_override = f"browser = p.chromium.launch(headless={is_headless})"
             
         context_opts = []
         if cfg.get("device"):
@@ -800,7 +815,7 @@ INSTRUCTIONS:
 4. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY for the correct keys. 
    - If the server says "FirstName is required", look at your casing! (e.g. maybe it wants 'FirstName' instead of 'firstName').
    - Use the exact keys the server's error message suggests.
-6. UI EXPLORATION: If 'AVAILABLE API ENDPOINTS' is empty but you have a 'BASE URL', start by using BROWSER_ACTION 'navigate' to the BASE URL to discover the application.
+{"6. UI EXPLORATION: If 'AVAILABLE API ENDPOINTS' is empty but you have a 'BASE URL', start by using BROWSER_ACTION 'navigate' to the BASE URL to discover the application." if has_browser else ""}
 4. SAFE MODE GUARDRAILS: {"ENABLED" if self.is_safe_mode else "DISABLED"}
    - {"Since Safe Mode is ENABLED: You are strictly forbidden from performing destructive actions (DELETE, PUT/PATCH that updates sensitive data) on PRODUCTION URLs. Only perform READ operations or safe creations." if self.is_safe_mode else "Since Safe Mode is DISABLED: You may perform destructive actions to test exploitation, but only if necessary to verify the scenario."}
 5. MISSION COMPLETE: You successfully finish when the intent of the User Story is verified. 
