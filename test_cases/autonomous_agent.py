@@ -403,27 +403,50 @@ except Exception as e:
             return {"error": "Native execution failed. Sandbox required."}
 
     def _init_browser_manager(self):
-        """Starts a persistent Playwright process in the sandbox for live view."""
+        """Starts a persistent Playwright process and VNC server in the sandbox."""
         if not self.sandbox:
             return
 
         cfg = self.browser_config or {}
-        is_headless = cfg.get("headless", False) # Default to headful for VNC unless overridden
+        is_headless = cfg.get("headless", False) 
+
+        # 1. If NOT headless, we need a display
+        if not is_headless:
+            logger.info("[Agent] Starting VNC Display Server (Visual Mode)...")
+            try:
+                # Start Xvfb (Display), Window Manager, and VNC broadcast
+                gui_cmd = (
+                    "Xvfb :1 -screen 0 1280x1024x24 & "
+                    "fluxbox & "
+                    "x11vnc -display :1 -nopw -forever -shared & "
+                    "/usr/share/novnc/utils/launch.sh --vnc localhost:5900 --listen 80 &"
+                )
+                self.sandbox.commands.run(gui_cmd, background=True)
+                time.sleep(2) # Give it a moment to bind to port 80
+            except Exception as e:
+                logger.error(f"[Agent] Failed to start GUI stack: {e}")
+
+        # 2. Start the Browser Manager script
+        env_vars = {
+            "PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright",
+            "DISPLAY": ":1"
+        }
 
         script = f"""
 import json
 import base64
 import sys
 import os
-# Force global browser path
+# Force global browser configs
 os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/ms-playwright'
+os.environ['DISPLAY'] = ':1'
 from playwright.sync_api import sync_playwright
 
 def run():
     with sync_playwright() as p:
         # Launch using config
         browser = p.chromium.launch(headless={is_headless})
-        context = browser.new_context()
+        context = browser.new_context(viewport={{'width': 1280, 'height': 800}})
         page = context.new_page()
         
         # Signal ready
@@ -461,10 +484,11 @@ if __name__ == "__main__":
 """
         try:
             self.sandbox.files.write("/home/user/browser_manager.py", script)
-            # Start persistent process
+            # Start persistent process with necessary environment
             self.browser_process = self.sandbox.commands.run(
                 "python3 -u /home/user/browser_manager.py", 
-                wait=False
+                wait=False,
+                env_vars=env_vars
             )
             # Wait for READY signal
             for line in self.browser_process.stdout:
