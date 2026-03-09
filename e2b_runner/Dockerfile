@@ -6,7 +6,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV DISPLAY=:1
 
 # Install GUI components for Live View
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     xvfb \
     fluxbox \
     x11vnc \
