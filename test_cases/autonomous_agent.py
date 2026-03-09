@@ -415,6 +415,8 @@ import json
 import base64
 import sys
 import os
+# Force global browser path
+os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/ms-playwright'
 from playwright.sync_api import sync_playwright
 
 def run():
@@ -444,14 +446,14 @@ def run():
                 
                 # Capture result
                 screenshot = base64.b64encode(page.screenshot()).decode('utf-8')
-                print(json.dumps({
+                print(json.dumps({{
                     "status": "success",
                     "title": page.title(),
                     "screenshot_b64": screenshot,
                     "html_preview": page.content()[:500]
-                }), flush=True)
+                }}), flush=True)
             except Exception as e:
-                print(json.dumps({"error": str(e)}), flush=True)
+                print(json.dumps({{"error": str(e)}}), flush=True)
         browser.close()
 
 if __name__ == "__main__":
@@ -641,29 +643,35 @@ run()
             return
             
         logger.info("[Agent] Verifying Playwright binaries in sandbox...")
-        # Check if chromium can launch. If playwright was updated via pip, this will fail if binaries are old.
-        check_cmd = "python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); p.chromium.launch(headless=True).close(); p.stop()'"
+        
+        # Force global browser path in every command
+        env_vars = {"PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright"}
+        check_cmd = "python3 -c 'import os; os.environ[\"PLAYWRIGHT_BROWSERS_PATH\"]=\"/ms-playwright\"; from playwright.sync_api import sync_playwright; p=sync_playwright().start(); p.chromium.launch(headless=True).close(); p.stop()'"
         
         needs_install = False
         try:
-            res = self.sandbox.commands.run(check_cmd, timeout=15)
+            # We use a custom run helper or catch specifically to avoid E2B exceptions killing the mission
+            res = self.sandbox.commands.run(check_cmd, timeout=20, env_vars=env_vars)
             if res.exit_code != 0:
-                logger.warning(f"[Agent] Playwright verification failed with exit code {res.exit_code}. Output: {res.stderr}")
+                logger.warning(f"[Agent] Playwright verification failed (exit {res.exit_code}). Repairing...")
                 needs_install = True
         except Exception as e:
-            logger.warning(f"[Agent] Playwright verification crashed: {e}. Attempting repair...")
+            logger.warning(f"[Agent] Playwright verification check crashed: {e}. Attempting repair...")
             needs_install = True
         
         if needs_install:
-            logger.info("[Agent] Installing Playwright Chromium and system dependencies...")
-            # Use --with-deps to install both browser and system libs
-            install_res = self.sandbox.commands.run("playwright install --with-deps chromium", timeout=300)
-            if install_res.exit_code == 0:
-                logger.info("[Agent] Playwright installation and dependency setup complete.")
-            else:
-                logger.error(f"[Agent] Playwright installation failed: {install_res.stderr}")
+            logger.info("[Agent] Running deep repair: playwright install --with-deps chromium")
+            try:
+                # Wrap the installation too! If it fails, we want to try to continue with whatever we have
+                install_res = self.sandbox.commands.run("playwright install --with-deps chromium", timeout=300, env_vars=env_vars)
+                if install_res.exit_code == 0:
+                    logger.info("[Agent] Deep repair successful.")
+                else:
+                    logger.error(f"[Agent] Deep repair failed with exit code {install_res.exit_code}.")
+            except Exception as e:
+                logger.error(f"[Agent] Critical error during Playwright repair: {e}")
         else:
-            logger.info("[Agent] Playwright binaries verified and working.")
+            logger.info("[Agent] Playwright binaries verified.")
 
 
     def _execute_stress_test(self, action, endpoint_map):
