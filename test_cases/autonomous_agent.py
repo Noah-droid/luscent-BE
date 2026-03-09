@@ -643,14 +643,25 @@ run()
         logger.info("[Agent] Verifying Playwright binaries in sandbox...")
         # Check if chromium can launch. If playwright was updated via pip, this will fail if binaries are old.
         check_cmd = "python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); p.chromium.launch(headless=True).close(); p.stop()'"
-        res = self.sandbox.commands.run(check_cmd)
         
-        if res.exit_code != 0:
-            logger.warning(f"[Agent] Playwright binaries missing/incompatible (Error: {res.stderr}). Re-installing...")
-            # Install chromium AND its dependencies (required if the new playwright version depends on newer system libs)
-            self.sandbox.commands.run("playwright install chromium")
-            self.sandbox.commands.run("playwright install-deps chromium")
-            logger.info("[Agent] Playwright installation and dependency setup complete.")
+        needs_install = False
+        try:
+            res = self.sandbox.commands.run(check_cmd, timeout=15)
+            if res.exit_code != 0:
+                logger.warning(f"[Agent] Playwright verification failed with exit code {res.exit_code}. Output: {res.stderr}")
+                needs_install = True
+        except Exception as e:
+            logger.warning(f"[Agent] Playwright verification crashed: {e}. Attempting repair...")
+            needs_install = True
+        
+        if needs_install:
+            logger.info("[Agent] Installing Playwright Chromium and system dependencies...")
+            # Use --with-deps to install both browser and system libs
+            install_res = self.sandbox.commands.run("playwright install --with-deps chromium", timeout=300)
+            if install_res.exit_code == 0:
+                logger.info("[Agent] Playwright installation and dependency setup complete.")
+            else:
+                logger.error(f"[Agent] Playwright installation failed: {install_res.stderr}")
         else:
             logger.info("[Agent] Playwright binaries verified and working.")
 
