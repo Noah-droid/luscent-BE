@@ -101,15 +101,9 @@ class AutonomousAgent:
         else:
             try:
                 logger.info(f"[Agent] Spawning sandbox environment: {self.sandbox_template}")
-                # Set global env vars at sandbox creation
-                env_vars = {
-                    "PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright",
-                    "DISPLAY": ":1"
-                }
                 self.sandbox = Sandbox.create(
                     template=self.sandbox_template, 
-                    api_key=self.e2b_api_key,
-                    env_vars=env_vars # Correct parameter name is env_vars
+                    api_key=self.e2b_api_key
                 )
                 
                 # Detect Live View (VNC) URL for Desktop templates
@@ -409,8 +403,6 @@ except Exception as e:
             except:
                 return {"stdout": res.stdout, "stderr": res.stderr, "error": "Invalid JSON output from script"}
         else:
-            # Fallback (Original method)
-            import execjs # or similar, but let's just stick to the sandbox-first approach
             return {"error": "Native execution failed. Sandbox required."}
 
     def _init_browser_manager(self):
