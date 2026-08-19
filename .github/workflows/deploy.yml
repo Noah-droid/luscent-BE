@@ -56,22 +56,22 @@ jobs:
             docker pull ghcr.io/noah-droid/qai-backend:latest
 
             echo "=== Stopping old container ==="
-            docker stop qai-api 2>/dev/null || true
-            docker rm qai-api 2>/dev/null || true
+            docker stop web 2>/dev/null || true
+            docker rm web 2>/dev/null || true
 
             echo "=== Starting new container ==="
             docker run -d \
-              --name qai-api \
+              --name web \
               --restart unless-stopped \
               --network host \
               --env-file /home/ubuntu/qai/.env \
               ghcr.io/noah-droid/qai-backend:latest
 
             echo "=== Running migrations ==="
-            docker exec qai-api python manage.py migrate --noinput
+            docker exec web python manage.py migrate --noinput
 
             echo "=== Cleanup ==="
             docker image prune -f
 
             echo "=== Deployment complete ==="
-            docker ps | grep qai-api
+            docker ps | grep web
