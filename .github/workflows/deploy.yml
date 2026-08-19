@@ -10,7 +10,7 @@ env:
   EC2_USER: ${{ secrets.EC2_USER }}
   EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner | lower }}/qai-backend
+  IMAGE_NAME: ${{ lower(github.repository_owner) }}/qai-backend
 
 jobs:
   build-and-push:
