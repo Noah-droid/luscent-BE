@@ -1,0 +1,227 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  EC2_HOST: 13.51.174.111
+  EC2_USER: ubuntu
+  EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push-backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for backend
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/backend
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push runner
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile.runner
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}/runner:${{ github.sha }},${{ env.REGISTRY }}/${{ github.repository }}/runner:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push celery
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile.celery
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}/celery:${{ github.sha }},${{ env.REGISTRY }}/${{ github.repository }}/celery:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-and-push-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for frontend
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/frontend
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: [build-and-push-backend, build-and-push-frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+          ssh-keyscan -H ${{ env.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Create deploy script on EC2
+        run: |
+          cat << 'DEPLOY_SCRIPT' > deploy.sh
+          #!/bin/bash
+          set -e
+
+          echo "=== Pulling latest images ==="
+          docker pull ${{ env.REGISTRY }}/${{ github.repository }}/backend:latest
+          docker pull ${{ env.REGISTRY }}/${{ github.repository }}/runner:latest
+          docker pull ${{ env.REGISTRY }}/${{ github.repository }}/celery:latest
+          docker pull ${{ env.REGISTRY }}/${{ github.repository }}/frontend:latest
+
+          echo "=== Stopping existing containers ==="
+          docker-compose -f docker-compose.prod.yml down || true
+
+          echo "=== Starting new containers ==="
+          docker-compose -f docker-compose.prod.yml up -d
+
+          echo "=== Running migrations ==="
+          docker-compose -f docker-compose.prod.yml exec -T api python manage.py migrate
+
+          echo "=== Cleanup ==="
+          docker image prune -f
+
+          echo "=== Deployment complete ==="
+          DEPLOY_SCRIPT
+          chmod +x deploy.sh
+
+      - name: Copy docker-compose.prod.yml to EC2
+        run: |
+          cat << 'COMPOSE' > docker-compose.prod.yml
+          services:
+            api:
+              image: ${{ env.REGISTRY }}/${{ github.repository }}/backend:latest
+              container_name: fawn-api
+              env_file:
+                - .env
+              ports:
+                - "8000:8000"
+              networks:
+                - fawn-network
+              restart: unless-stopped
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+
+            celery:
+              image: ${{ env.REGISTRY }}/${{ github.repository }}/celery:latest
+              container_name: fawn-celery
+              env_file:
+                - .env
+              depends_on:
+                - api
+              networks:
+                - fawn-network
+              restart: unless-stopped
+
+            runner:
+              image: ${{ env.REGISTRY }}/${{ github.repository }}/runner:latest
+              container_name: fawn-runner
+              env_file:
+                - .env
+              ports:
+                - "8080:8080"
+              depends_on:
+                - api
+              networks:
+                - fawn-network
+              restart: unless-stopped
+
+            frontend:
+              image: ${{ env.REGISTRY }}/${{ github.repository }}/frontend:latest
+              container_name: fawn-frontend
+              ports:
+                - "80:80"
+                - "443:443"
+              networks:
+                - fawn-network
+              restart: unless-stopped
+
+          networks:
+            fawn-network:
+              driver: bridge
+          COMPOSE
+          scp -i ~/.ssh/ec2_key docker-compose.prod.yml ${{ env.EC2_USER }}@${{ env.EC2_HOST }}:~/
+
+      - name: Copy deploy script to EC2
+        run: |
+          scp -i ~/.ssh/ec2_key deploy.sh ${{ env.EC2_USER }}@${{ env.EC2_HOST }}:~/
+
+      - name: Copy .env to EC2
+        run: |
+          # Note: You need to add your .env as a secret named EC2_ENV_FILE in GitHub
+          echo "${{ secrets.EC2_ENV_FILE }}" > .env.prod
+          scp -i ~/.ssh/ec2_key .env.prod ${{ env.EC2_USER }}@${{ env.EC2_HOST }}:~/.env
+
+      - name: Run deployment on EC2
+        run: |
+          ssh -i ~/.ssh/ec2_key ${{ env.EC2_USER }}@${{ env.EC2_HOST }} "cd ~ && ./deploy.sh"
