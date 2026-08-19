@@ -813,6 +813,16 @@ class CollectionAutoPilotView(APIView):
         layer = request.data.get("layer", "backend")
         use_visual_ai = request.data.get("use_visual_ai", False)
         
+        # Auto-infer runner_types from layer if not provided
+        runner_types = request.data.get("runner_types", [])
+        if not runner_types:
+            if layer == "fullstack":
+                runner_types = ["http", "browser", "mail"]
+            elif layer == "frontend":
+                runner_types = ["browser", "mail"]
+            else: # backend
+                runner_types = ["http", "mail"]
+
         if not HAS_CELERY:
             return Response({"error": "Auto-Pilot requires Celery for background processing."}, status=501)
 
@@ -829,12 +839,19 @@ class CollectionAutoPilotView(APIView):
         from .models import AgentMission
         final_story = user_story or collection.user_story or collection.description or collection.project.user_story or collection.project.description or ""
         
+        # Persist browser config so the worker can pick it up
+        browser_config = request.data.get("browser_config", {})
+        is_safe_mode = request.data.get("is_safe_mode", True)
+
         mission = AgentMission.objects.create(
             user=request.user,
             collection=collection,
             user_story=final_story,
             batch_id=str(batch_id),
-            status="pending"
+            mission_type="qa_testing",
+            browser_config=browser_config,
+            is_safe_mode=is_safe_mode,
+            status="running" # Task will take over
         )
 
         from .tasks import collection_auto_pilot_task
@@ -852,11 +869,14 @@ class CollectionAutoPilotView(APIView):
                 categories=categories,
                 layer=layer,
                 use_visual_ai=use_visual_ai,
-                mission_id=mission.id # Pass mission explicitly
+                mission_id=mission.id
             )
             logger.info(f"[CollectionAutoPilotView] Task {task.id} queued successfully")
         except Exception as e:
             logger.error(f"[CollectionAutoPilotView] Failed to queue task: {e}")
+            mission.status = "error"
+            mission.error_message = str(e)
+            mission.save()
             return Response({"error": "Failed to queue background task"}, status=500)
 
         return Response({
@@ -898,7 +918,7 @@ class CollectionStatusView(APIView):
                 "summary": {"total": 0, "passed": 0, "failed": 0, "pass_rate": 0},
                 "endpoints": []
             })
-
+        
         # Get the latest run for each test case
         from django.db.models import OuterRef, Subquery
         latest_run_id = TestRun.objects.filter(

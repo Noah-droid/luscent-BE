@@ -289,6 +289,7 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
             
             # Create a failure record in TestRun for visibility
             try:
+                from collection.models import Endpoint
                 # Ensure at least one endpoint exists
                 endpoint = collection.endpoints.first()
                 if not endpoint:
