@@ -1,0 +1,57 @@
+services:
+  # 2. Django API (The Central Brain)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qai-api
+    env_file:
+      - .env
+    ports:
+      - "${API_PORT:-8000}:8000"
+    networks:
+      - qai-network
+    profiles:
+      - api
+    # For EC2: use 'host' network mode or keep 'bridge' with port mapping
+    # network_mode: ${NETWORK_MODE:-bridge}
+
+  # 3. Celery Worker + Beat
+  celery:
+    build:
+      context: .
+      dockerfile: Dockerfile.celery
+    container_name: qai-celery
+    env_file:
+      - .env
+    depends_on:
+      - api
+    networks:
+      - qai-network
+    profiles:
+      - celery
+    # network_mode: ${NETWORK_MODE:-bridge}
+
+  # 4. Hybrid Runner (Playwright/API tests)
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    container_name: qai-hybrid-runner
+    env_file:
+      - .env
+    ports:
+      - "${RUNNER_PORT:-8080}:8080"
+    depends_on:
+      - api
+    networks:
+      - qai-network
+    restart: always
+    profiles:
+      - runner
+    # network_mode: ${NETWORK_MODE:-bridge}
+
+networks:
+  qai-network:
+    driver: ${NETWORK_DRIVER:-bridge}
+    # For EC2 host networking, use: driver: host (requires network_mode: host on services)
