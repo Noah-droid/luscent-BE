@@ -10,6 +10,7 @@ env:
   EC2_USER: ${{ secrets.EC2_USER }}
   EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
   REGISTRY: ghcr.io
+  IMAGE_TAG: latest
 
 jobs:
   build-and-push:
@@ -31,29 +32,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set lowercase repo owner
-        run: echo "LOWER_OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.LOWER_OWNER }}/qai-backend
-          tags: |
-            type=ref,event=branch
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
-
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ env.REGISTRY }}/noah-droid/qai-backend:${{ env.IMAGE_TAG }}
 
   deploy:
     needs: build-and-push
@@ -68,7 +53,7 @@ jobs:
           script: |
             set -e
             echo "=== Pulling latest image ==="
-            docker pull ${{ env.REGISTRY }}/${{ env.LOWER_OWNER }}/qai-backend:latest
+            docker pull ghcr.io/noah-droid/qai-backend:latest
 
             echo "=== Stopping old container ==="
             docker stop qai-api 2>/dev/null || true
@@ -80,7 +65,7 @@ jobs:
               --restart unless-stopped \
               --network host \
               --env-file /home/ubuntu/qai/.env \
-              ${{ env.REGISTRY }}/${{ env.LOWER_OWNER }}/qai-backend:latest
+              ghcr.io/noah-droid/qai-backend:latest
 
             echo "=== Running migrations ==="
             docker exec qai-api python manage.py migrate --noinput
