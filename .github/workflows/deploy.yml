@@ -10,7 +10,7 @@ env:
   EC2_USER: ${{ secrets.EC2_USER }}
   EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ lower(github.repository_owner) }}/qai-backend
+  REPO_OWNER: ${{ github.repository_owner }}
 
 jobs:
   build-and-push:
@@ -36,7 +36,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ lower(env.REPO_OWNER) }}/qai-backend
           tags: |
             type=ref,event=branch
             type=sha,prefix=
@@ -66,7 +66,7 @@ jobs:
           script: |
             set -e
             echo "=== Pulling latest image ==="
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            docker pull ghcr.io/${{ lower(env.REPO_OWNER) }}/qai-backend:latest
 
             echo "=== Stopping old container ==="
             docker stop qai-api 2>/dev/null || true
@@ -78,7 +78,7 @@ jobs:
               --restart unless-stopped \
               --network host \
               --env-file /home/ubuntu/qai/.env \
-              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+              ghcr.io/${{ lower(env.REPO_OWNER) }}/qai-backend:latest
 
             echo "=== Running migrations ==="
             docker exec qai-api python manage.py migrate --noinput
