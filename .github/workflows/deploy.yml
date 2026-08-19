@@ -75,3 +75,4 @@ jobs:
 
             echo "=== Deployment complete ==="
             docker ps | grep web
+            
