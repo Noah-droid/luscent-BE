@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: qai-api
+    container_name: web
     env_file:
       - .env
     ports:
@@ -21,7 +21,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.celery
-    container_name: qai-celery
+    container_name: celery
     env_file:
       - .env
     depends_on:
@@ -37,7 +37,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.runner
-    container_name: qai-hybrid-runner
+    container_name: runner
     env_file:
       - .env
     ports:
