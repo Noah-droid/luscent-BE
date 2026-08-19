@@ -10,7 +10,7 @@ env:
   EC2_USER: ${{ secrets.EC2_USER }}
   EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/qai-backend
+  IMAGE_NAME: ${{ github.repository_owner | lower }}/qai-backend
 
 jobs:
   build-and-push:
@@ -69,22 +69,22 @@ jobs:
             docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
             echo "=== Stopping old container ==="
-            docker stop web 2>/dev/null || true
-            docker rm web 2>/dev/null || true
+            docker stop qai-api 2>/dev/null || true
+            docker rm qai-api 2>/dev/null || true
 
             echo "=== Starting new container ==="
             docker run -d \
-              --name -api \
+              --name qai-api \
               --restart unless-stopped \
               --network host \
               --env-file /home/ubuntu/qai/.env \
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
             echo "=== Running migrations ==="
-            docker exec web python manage.py migrate --noinput
+            docker exec qai-api python manage.py migrate --noinput
 
             echo "=== Cleanup ==="
             docker image prune -f
 
             echo "=== Deployment complete ==="
-            docker ps | grep web
+            docker ps | grep qai-api
