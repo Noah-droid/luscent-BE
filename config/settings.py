@@ -221,8 +221,17 @@ SIMPLE_JWT = {
 
 LLM_API_KEY = config('LLM_API_KEY', default=None)
 LLM_BASE_URL = config('LLM_BASE_URL', default="https://api.openai.com/v1")
-LLM_PROVIDER = config('LLM_PROVIDER', default="openai") # openai or gemini
+LLM_PROVIDER = config('LLM_PROVIDER', default="gemini") # openai or gemini
 GEMINI_API_KEY = config('GEMINI_API_KEY', default=None)
+GEMINI_MODEL = config('GEMINI_MODEL', default='gemini-3.5-flash')
+OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o-mini')
+
+# litellm Configuration
+import litellm
+litellm.drop_params = True      # Drop unsupported params instead of erroring
+litellm.num_retries = 3         # Auto-retry on 429, 500, 502, 503
+litellm.request_timeout = 90    # 90s timeout per request
+litellm.set_verbose = DEBUG     # Verbose logging in debug mode only
 
 # Celery Configuration
 CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://localhost:6379/0')
