@@ -1,4 +1,21 @@
 services:
+  # 1. Redis (Celery Broker + Cache)
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - qai-network
+    volumes:
+      - redis-data:/data
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
   # 2. Django API (The Central Brain)
   api:
     build:
@@ -25,7 +42,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - api
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
     networks:
       - qai-network
     profiles:
@@ -55,3 +75,6 @@ networks:
   qai-network:
     driver: ${NETWORK_DRIVER:-bridge}
     # For EC2 host networking, use: driver: host (requires network_mode: host on services)
+
+volumes:
+  redis-data:
