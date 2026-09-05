@@ -99,3 +99,43 @@ class Endpoint(models.Model):
         """Override save to ensure validation runs."""
         self.full_clean()
         super().save(*args, **kwargs)
+
+
+class ImportJob(models.Model):
+    """
+    A queued/background import of endpoints into a collection (Swagger/OpenAPI, crawler).
+    Imports run through Celery when available; the row doubles as the source of truth
+    for status so the UI can show progress without touching the broker.
+    """
+
+    KIND_CHOICES = [("swagger", "Swagger"), ("crawler", "Crawler")]
+    SOURCE_CHOICES = [("url", "URL"), ("file", "File")]
+    STATUS_CHOICES = [
+        ("queued", "Queued"),
+        ("running", "Running"),
+        ("success", "Success"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    collection = models.ForeignKey(Collection, on_delete=models.CASCADE, related_name="import_jobs")
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, default="swagger")
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default="url")
+    # Human-readable label: URL for url imports, filename for file imports
+    spec_name = models.CharField(max_length=500, blank=True, default="")
+    # Inline spec payload for file imports (worker may run on a different container).
+    # Cleared once the job finishes to keep rows lean.
+    spec_text = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued")
+    skip_validation = models.BooleanField(default=False)
+    imported_count = models.PositiveIntegerField(default=0)
+    error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.kind}/{self.source} {self.collection_id} -> {self.status}"
