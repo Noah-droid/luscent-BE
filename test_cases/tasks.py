@@ -280,11 +280,34 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
                     logs=final_logs,
                     triggered_by="ai_agent"
                 )
+        
+        # Populate session report summary
+        from django.utils import timezone as tz
+        mission.status = "completed"
+        mission.completed_at = tz.now()
+        mission.total_steps = mission.steps.count()
+        mission.passed_steps = mission.steps.filter(status='passed').count()
+        mission.failed_steps = mission.steps.filter(status__in=['failed', 'error']).count()
+        mission.summary = mission_summary or None
+        if mission.created_at:
+            delta = tz.now() - mission.created_at
+            mission.duration_seconds = int(delta.total_seconds())
+        mission.save()
     except Exception as e:
         logger.error(f"[CollectionAutoPilot] Agent Mission Failed: {e}")
         if mission:
+            from django.utils import timezone as tz
             mission.status = "error"
-            mission.error_message = f"Critical Failure: {str(e)}"
+            mission.completed_at = tz.now()
+            err_str = str(e)
+            if '404' in err_str and 'Not Found' in err_str:
+                mission.error_message = "The AI model returned an error (404). Check that your API key has access to the configured model."
+            elif '429' in err_str:
+                mission.error_message = "Rate limited by the AI service. Please wait and try again."
+            elif '503' in err_str:
+                mission.error_message = "The AI service is temporarily unavailable. Please try again shortly."
+            else:
+                mission.error_message = f"Mission failed: {err_str[:200]}"
             mission.save()
             
             # Create a failure record in TestRun for visibility
@@ -435,12 +458,20 @@ def run_autonomous_mission_task(mission_id, user_id):
     project = collection.project
     project_vars = project.environment_variables or {}
     
-    # Customize mission depth/scenarios based on mission_type
-    if mission.mission_type == "security_audit":
-        scenarios = "SECURITY, AUTH_BYPASS, INJECTION, IDOR"
+    # Use user-selected scenarios from the mission (persisted at creation time)
+    # Fallback to mission_type defaults only if nothing was stored
+    if mission.scenarios:
+        scenarios = mission.scenarios if isinstance(mission.scenarios, list) else [mission.scenarios]
+    elif mission.mission_type == "security_audit":
+        scenarios = ["SECURITY", "AUTH_BYPASS", "INJECTION", "IDOR"]
+    else:
+        scenarios = ["HAPPY_PATH", "VALIDATION_ERROR", "EDGE_CASE"]
+    
+    if mission.categories:
+        categories = mission.categories
+    elif mission.mission_type == "security_audit":
         categories = ["security"]
     else:
-        scenarios = "HAPPY_PATH, VALIDATION_ERROR, EDGE_CASE"
         categories = ["functional"]
 
     # 3. Initialize Agent
@@ -503,7 +534,18 @@ def run_autonomous_mission_task(mission_id, user_id):
                         triggered_by="ai_agent"
                     )
         
+        # Populate session report summary
+        from django.utils import timezone as tz
         mission.status = "completed"
+        mission.completed_at = tz.now()
+        mission.total_steps = mission.steps.count()
+        mission.passed_steps = mission.steps.filter(status='passed').count()
+        mission.failed_steps = mission.steps.filter(status__in=['failed', 'error']).count()
+        mission.summary = mission_summary or None
+        # Calculate duration from creation time
+        if mission.created_at:
+            delta = tz.now() - mission.created_at
+            mission.duration_seconds = int(delta.total_seconds())
         mission.save()
         
         # Schedule batch report
@@ -513,7 +555,18 @@ def run_autonomous_mission_task(mission_id, user_id):
     except Exception as e:
         logger.error(f"Mission {mission_id} failed: {e}")
         mission.status = "error"
-        mission.error_message = f"Critical Failure: {str(e)}"
+        mission.completed_at = tz.now()
+        mission.error_message = str(e)[:200]
+        mission.save()
+        err_str = str(e)
+        if '404' in err_str and 'Not Found' in err_str:
+            mission.error_message = "The AI model returned an error (404). Check that your API key has access to the configured model."
+        elif '429' in err_str:
+            mission.error_message = "Rate limited by the AI service. Please wait and try again."
+        elif '503' in err_str:
+            mission.error_message = "The AI service is temporarily unavailable. Please try again shortly."
+        else:
+            mission.error_message = f"Mission failed: {err_str[:200]}"
         mission.save()
 
         # Create a failure record in TestRun for visibility
