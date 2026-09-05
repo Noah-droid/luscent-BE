@@ -167,6 +167,10 @@ class TestRun(models.Model):
     def __str__(self):
         return f"Run {self.id} for {self.test_case.name} - {self.status}"
 
+    class Meta:
+        indexes = [
+            models.Index(fields=['test_case', '-executed_at'], name='idx_run_tc_executed'),
+        ]
 
 
 class AgentMission(models.Model):
@@ -189,13 +193,54 @@ class AgentMission(models.Model):
     batch_id = models.UUIDField(db_index=True, unique=True)
     browser_config = models.JSONField(default=dict, blank=True, help_text="Configs like: {'browser': 'firefox', 'device': 'iPhone 14'}")
     session_url = models.URLField(blank=True, null=True, help_text="Public URL to the running Sandbox for manual testing")
+    app_url = models.URLField(blank=True, null=True, help_text="Public URL to the user's app running inside the sandbox")
     error_message = models.TextField(blank=True, null=True, help_text="Why the mission failed (billing, setup, etc.)")
     is_safe_mode = models.BooleanField(default=True, help_text="In Safe Mode, the agent avoids destructive actions (Delete, Update) on production URLs.")
+    
+    # Mission configuration (persisted so tasks can read user-selected scenarios)
+    scenarios = models.JSONField(default=list, blank=True, help_text='User-selected scenarios: ["HAPPY_PATH", "SECURITY", ...]')
+    categories = models.JSONField(default=list, blank=True, help_text='Test categories: ["functional", "security", ...]')
+    
+    # Session Report Summary (populated on mission completion)
+    total_steps = models.IntegerField(default=0, help_text="Total steps executed in this mission")
+    passed_steps = models.IntegerField(default=0, help_text="Steps that passed")
+    failed_steps = models.IntegerField(default=0, help_text="Steps that failed")
+    duration_seconds = models.IntegerField(default=0, help_text="Total mission wall-clock duration in seconds")
+    completed_at = models.DateTimeField(null=True, blank=True, help_text="When the mission finished (passed/failed/error)")
+    summary = models.TextField(blank=True, null=True, help_text="AI-generated executive summary of the mission")
+    
+    # Regression baseline support
+    previous_session = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='regression_sessions',
+        help_text="Previous session this one is regressing against"
+    )
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"Mission {self.batch_id} - {self.status}"
+    
+    @property
+    def pass_rate(self):
+        if self.total_steps == 0:
+            return 0.0
+        return round((self.passed_steps / self.total_steps) * 100, 2)
+    
+    @property
+    def regressions(self):
+        """Steps that passed in the previous session but failed in this one."""
+        if not self.previous_session:
+            return []
+        prev_steps = set(
+            self.previous_session.steps.filter(status='passed').values_list('action_type', flat=True)
+        )
+        curr_failed = self.steps.filter(status='failed')
+        return [
+            {'step_number': s.step_number, 'action_type': s.action_type, 'thought': s.thought}
+            for s in curr_failed if s.action_type in prev_steps
+        ]
 
 class AgentMissionStep(models.Model):
     mission = models.ForeignKey(AgentMission, on_delete=models.CASCADE, related_name="steps")
