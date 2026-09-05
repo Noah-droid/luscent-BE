@@ -1,10 +1,12 @@
-import requests
 import json
 import os
 import logging
 from django.conf import settings
+import litellm
 
 logger = logging.getLogger(__name__)
+
+
 
 class AITestGenerator:
     def __init__(self):
@@ -13,12 +15,27 @@ class AITestGenerator:
         self.openai_api_key = getattr(settings, 'LLM_API_KEY', None)
         self.openai_base_url = getattr(settings, 'LLM_BASE_URL', "https://api.openai.com/v1")
         self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)
+        self.nvidia_api_key = getattr(settings, 'NVIDIA_NIM_API_KEY', None)
         
-        # Using latest 2026 state-of-the-art models
+        # litellm model naming: prefix provider for auto-routing
         if self.provider == "gemini":
-            self.model = getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash')
+            raw_model = getattr(settings, 'GEMINI_MODEL', 'gemini-3.5-flash')
+            self.model = raw_model if raw_model.startswith('gemini/') else f'gemini/{raw_model}'
+        elif self.provider == "nvidia":
+            raw_model = getattr(settings, 'NVIDIA_MODEL', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning')
+            self.model = raw_model if raw_model.startswith('nvidia_nim/') else f'nvidia_nim/{raw_model}'
         else:
-            self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
+            raw_model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
+            self.model = raw_model
+        
+        # Set API keys as env vars for litellm auto-detection
+        if self.gemini_api_key:
+            os.environ['GEMINI_API_KEY'] = self.gemini_api_key
+        if self.openai_api_key:
+            os.environ['OPENAI_API_KEY'] = self.openai_api_key
+        if self.nvidia_api_key:
+            os.environ['NVIDIA_NIM_API_KEY'] = self.nvidia_api_key
+            os.environ['NVIDIA_API_KEY'] = self.nvidia_api_key
             
         self.max_tokens = 8192 
         self.temperature = 0.5 # Lower temperature for better structural planning
@@ -31,10 +48,18 @@ class AITestGenerator:
         if not allowed_runners:
             allowed_runners = ["http"]
 
-        # 0. Get Project Environment Variables
+        # 0. Get Project Environment Variables and Structured Context
         project_vars = {}
         if hasattr(collection.project, 'environment_variables') and collection.project.environment_variables:
              project_vars = collection.project.environment_variables
+        
+        project_context = {
+            'auth_type': getattr(collection.project, 'auth_type', 'none') or 'none',
+            'tech_stack': getattr(collection.project, 'tech_stack', {}) or {},
+            'preferred_test_types': getattr(collection.project, 'preferred_test_types', []) or [],
+            'critical_flows': getattr(collection.project, 'critical_flows', []) or [],
+            'domain_rules': getattr(collection.project, 'domain_rules', '') or '',
+        }
 
         # 1. Gather all endpoints in the collection
         endpoints = collection.endpoints.all()
@@ -54,7 +79,7 @@ class AITestGenerator:
             return []
 
         # 2. Step 1: PLAN THE FLOW (The Architect)
-        plan = self._plan_orchestration(collection, endpoint_map, user_story, scenarios)
+        plan = self._plan_orchestration(collection, endpoint_map, user_story, scenarios, project_vars, project_context)
         if not plan:
             logger.warning("AI failed to generate an orchestration plan.")
             return []
@@ -75,12 +100,38 @@ class AITestGenerator:
 
         return orchestrated_tests
 
-    def _plan_orchestration(self, collection, endpoint_map, user_story, scenarios, project_vars=None):
+    def _plan_orchestration(self, collection, endpoint_map, user_story, scenarios, project_vars=None, project_context=None):
         """
         Analyzes the collection and returns a list of logical steps with dependencies.
         """
+        ctx = project_context or {}
         env_context = f"\nPROJECT ENVIRONMENT VARIABLES:\n{json.dumps(project_vars or {}, indent=2)}" if project_vars else ""
         
+        # Build structured context sections
+        auth_section = f"\nAUTHENTICATION TYPE: {ctx.get('auth_type', 'none')}" if ctx.get('auth_type') and ctx['auth_type'] != 'none' else ""
+        
+        tech_section = ""
+        tech_stack = ctx.get('tech_stack', {})
+        if tech_stack:
+            tech_parts = []
+            for cat in ['frontend', 'backend', 'database']:
+                items = tech_stack.get(cat, [])
+                if items:
+                    tech_parts.append(f"{cat.title()}: {', '.join(items)}")
+            if tech_parts:
+                tech_section = f"\nTECH STACK: {' | '.join(tech_parts)}"
+        
+        flows_section = ""
+        critical_flows = ctx.get('critical_flows', [])
+        if critical_flows:
+            flow_lines = [f"- [{f.get('priority', 'P1')}] {f.get('name', 'Unnamed')}" for f in critical_flows]
+            flows_section = f"\nCRITICAL FLOWS (prioritize these):\n{'\n'.join(flow_lines)}"
+        
+        domain_section = f"\nDOMAIN RULES: {ctx.get('domain_rules', '')}" if ctx.get('domain_rules') else ""
+        
+        preferred_types = ctx.get('preferred_test_types', [])
+        preferred_section = f"\nPREFERRED TEST TYPES: {', '.join(preferred_types)}" if preferred_types else ""
+
         prompt = f"""
 You are a Senior QA Architect. Your task is to design a SENTIENT execution plan for this API collection.
 Do NOT just loop through endpoints. Instead, follow the "User Lifecycle".
@@ -88,6 +139,7 @@ Do NOT just loop through endpoints. Instead, follow the "User Lifecycle".
 PROJECT: {collection.project.name}
 COLLECTION: {collection.name}
 GOAL: {user_story or 'Establish a full working environment and test all core features.'}
+{auth_section}{preferred_section}{tech_section}{flows_section}{domain_section}
 {env_context}
 
 ENDPOINTS AVAILABLE:
@@ -172,44 +224,17 @@ Follow the standard TestCase schema:
             return []
 
     def _call_llm(self, prompt):
-        if self.provider == "gemini":
-            return self._call_gemini(prompt)
-        else:
-            return self._call_openai(prompt)
-
-    def _call_openai(self, prompt):
-        headers = {
-            "Authorization": f"Bearer {self.openai_api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": "You are a professional QA Orchestrator. Output ONLY valid JSON."},
+        """Unified LLM call via litellm — handles retries, model routing, and provider fallback automatically."""
+        response = litellm.completion(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": "You are a professional QA Orchestrator. Output ONLY valid JSON. Be precise and deterministic in your responses."},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": self.temperature
-        }
-        resp = requests.post(f"{self.openai_base_url}/chat/completions", json=payload, headers=headers, timeout=40)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-
-    def _call_gemini(self, prompt):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.gemini_api_key}"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [{
-                "parts": [{"text": f"SYSTEM: You are a professional QA Orchestrator. Output ONLY valid JSON.\n\nUSER: {prompt}"}]
-            }],
-            "generationConfig": {
-                "temperature": self.temperature,
-                "maxOutputTokens": self.max_tokens,
-                "response_mime_type": "application/json"
-            }
-        }
-        resp = requests.post(url, json=payload, headers=headers, timeout=40)
-        resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            max_tokens=self.max_tokens,
+            response_format={"type": "json_object"}
+        )
+        return response.choices[0].message.content
 
     def _parse_response(self, response):
         """Cleans AI wrapping and parses JSON."""
@@ -233,27 +258,18 @@ Follow the standard TestCase schema:
         
         prompt = "Describe visual glitches, error messages, or layout breaks in this app. If perfect, reply 'NO_DEFECTS'."
         try:
-            if self.provider == "gemini":
-                return self._call_gemini_vision(prompt, encoded_string)
-            return self._call_openai_vision(prompt, encoded_string)
+            response = litellm.completion(
+                model=self.model,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
+                    ]
+                }],
+                max_tokens=300
+            )
+            return response.choices[0].message.content
         except Exception as e:
             logger.error(f"Visual Analysis failed: {e}")
             return f"Analysis Error: {e}"
-
-    def _call_openai_vision(self, prompt, base64_image):
-        headers = {"Authorization": f"Bearer {self.openai_api_key}", "Content-Type": "application/json"}
-        payload = {
-            "model": "gpt-4o-mini",
-            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}]}],
-            "max_tokens": 300
-        }
-        resp = requests.post(f"{self.openai_base_url}/chat/completions", json=payload, headers=headers, timeout=40)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-
-    def _call_gemini_vision(self, prompt, base64_image):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.gemini_api_key}"
-        payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/png", "data": base64_image}}]}]}
-        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=40)
-        resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
