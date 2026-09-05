@@ -31,8 +31,8 @@ fi
 
 # 3. Choose deployment mode
 echo "Select deployment mode:"
-echo "1) API only (with external Neon DB + Redis)"
-echo "2) API + Celery (with external DB + Redis)"
+echo "1) API only (with external Neon DB + local Redis container)"
+echo "2) API + Celery (with external DB + local Redis container)"
 echo "3) Full stack (API + Celery + Runner)"
 read -p "Choice [1-3]: " choice
 

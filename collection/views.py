@@ -14,7 +14,7 @@ from .models import Collection, Endpoint, ImportJob
 from .serializers import CollectionSerializer, EndpointSerializer, ImportJobSerializer
 from projects.models import Project
 from .crawler import crawl_url
-from .importer import queue_swagger_import
+from .importer import queue_swagger_import, reap_stale_jobs
 
 try:
     from .tasks import import_crawler_task
@@ -181,6 +181,9 @@ class ImportJobListView(APIView):
         responses={200: ImportJobSerializer(many=True)}
     )
     def get(self, request):
+        # Lazily fail jobs a dead worker left "active" so the progress toast doesn't
+        # spin forever (and future imports aren't 409-blocked by ghosts).
+        reap_stale_jobs(user=request.user)
         qs = ImportJob.objects.filter(collection__project__user=request.user).select_related(
             "collection__project"
         )
@@ -226,6 +229,10 @@ class SwaggerImportView(APIView):
 
         raw_skip = request.data.get("skip_validation", False)
         skip_validation = str(raw_skip).lower() in ('true', '1', 'yes')
+
+        # Fail rows a dead worker left "active" before deciding whether a *fresh*
+        # import is really in flight, so orphans don't 409-block new imports.
+        reap_stale_jobs(collection=collection)
 
         # Only one active import per collection at a time
         if ImportJob.objects.filter(collection=collection, status__in=["queued", "running"]).exists():

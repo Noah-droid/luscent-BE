@@ -52,20 +52,59 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
-            echo "=== Pulling latest image ==="
+            echo "=== Pulling latest images ==="
             docker pull ghcr.io/noah-droid/qai-backend:latest
+            docker pull redis:7-alpine
 
-            echo "=== Stopping old container ==="
-            docker stop web 2>/dev/null || true
-            docker rm web 2>/dev/null || true
+            # Local Redis is the broker/cache for the whole stack (the .env may
+            # still point at an old external Redis Cloud host, so we override the
+            # broker/result URLs below).
+            echo "=== Starting Redis (local broker/cache) ==="
+            docker stop redis 2>/dev/null || true
+            docker rm redis 2>/dev/null || true
+            docker run -d \
+              --name redis \
+              --restart unless-stopped \
+              --network host \
+              -v qai-redis-data:/data \
+              redis:7-alpine redis-server --appendonly yes
 
-            echo "=== Starting new container ==="
+            echo "=== Waiting for Redis ==="
+            for i in $(seq 1 15); do
+              if docker exec redis redis-cli ping 2>/dev/null | grep -q PONG; then
+                break
+              fi
+              sleep 1
+            done
+
+            echo "=== Stopping old containers ==="
+            docker stop web celery 2>/dev/null || true
+            docker rm web celery 2>/dev/null || true
+
+            echo "=== Starting API ==="
             docker run -d \
               --name web \
               --restart unless-stopped \
               --network host \
               --env-file /home/ubuntu/qai/.env \
+              -e CELERY_BROKER_URL=redis://127.0.0.1:6379/0 \
+              -e CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/1 \
               ghcr.io/noah-droid/qai-backend:latest
+
+            echo "=== Starting Celery worker + beat ==="
+            # Host has ~1GB RAM and gunicorn already runs 2 workers: use the solo
+            # pool so the worker is a single process instead of prefork (parent +
+            # child), which keeps the host from OOM-killing containers.
+            docker run -d \
+              --name celery \
+              --restart unless-stopped \
+              --network host \
+              --env-file /home/ubuntu/qai/.env \
+              -e CELERY_BROKER_URL=redis://127.0.0.1:6379/0 \
+              -e CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/1 \
+              --entrypoint celery \
+              ghcr.io/noah-droid/qai-backend:latest \
+              -A config worker --beat --loglevel=info --pool=solo
 
             echo "=== Running migrations ==="
             docker exec web python manage.py migrate --noinput
@@ -74,6 +113,6 @@ jobs:
             docker image prune -f
 
             echo "=== Deployment complete ==="
-            docker ps | grep web
+            docker ps | grep -E "redis|web|celery"
 
             

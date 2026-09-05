@@ -143,7 +143,13 @@ DATABASES = {
         'PASSWORD': config('PGPASSWORD'),
         'HOST': config('PGHOST'),
         'PORT': config('PGPORT', default=5432, cast=int),
-        'CONN_MAX_AGE': 600,
+        # Neon (the external host used in production) closes idle pooled
+        # connections server-side. A long CONN_MAX_AGE then reuses dead sockets and
+        # 500s with "SSL connection has been closed unexpectedly" (seen on
+        # /api/auth/me/ and /api/collections/import-jobs/). Keep connections
+        # short-lived and health-checked instead.
+        'CONN_MAX_AGE': 60,
+        'CONN_HEALTH_CHECKS': True,
     }
 }
 

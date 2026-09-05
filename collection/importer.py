@@ -7,7 +7,9 @@ updates status/counts/errors. Keeping the payload on the row means file uploads
 work even when the API and Celery containers don't share a filesystem.
 """
 import logging
+import threading
 import time
+from datetime import timedelta
 
 from django.conf import settings
 from django.utils import timezone
@@ -23,7 +25,13 @@ from .openapi_parser import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["queue_swagger_import", "run_swagger_import"]
+__all__ = ["queue_swagger_import", "run_swagger_import", "reap_stale_jobs"]
+
+# How long an ImportJob may stay queued/running before we consider its worker dead
+# (OOM-killed, container restarted, broker hiccup...) and stop treating it as active.
+# Far beyond Celery's own soft time limit (120s), so a slow-but-live run is never
+# touched; only genuinely orphaned rows are reaped.
+STALE_JOB_AFTER_SECONDS = 10 * 60
 
 
 def run_swagger_import(job):
@@ -33,6 +41,18 @@ def run_swagger_import(job):
     """
     if not isinstance(job, ImportJob) or job.status in ("success", "failed"):
         return {"skipped": True}
+
+    # A "running" row means another process owns the job. Back off while it looks
+    # alive; if it has been running far longer than any import should take, the
+    # previous worker died mid-run (e.g. OOM-killed) — fail the stale row and then
+    # re-run cleanly below.
+    if job.status == "running":
+        if job.started_at and (timezone.now() - job.started_at).total_seconds() < STALE_JOB_AFTER_SECONDS:
+            return {"skipped": True, "reason": "job already running"}
+        job.status = "failed"
+        job.error = "Import was interrupted (worker stopped). Re-running."
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "error", "finished_at"])
 
     job.status = "running"
     job.started_at = timezone.now()
@@ -100,9 +120,10 @@ def run_swagger_import(job):
 
 def queue_swagger_import(collection, *, source="url", spec_name="", spec_text=None, skip_validation=False):
     """
-    Create an ImportJob and dispatch it to Celery. Falls back to running inline
-    when Celery isn't available/unreachable so imports never silently vanish.
-    Returns the job (which may already be finished in the inline fallback).
+    Create an ImportJob and dispatch it to Celery. Falls back to an in-process run
+    (synchronous in local dev, daemon thread on deployed hosts) when Celery isn't
+    available/unreachable so imports never block the caller or silently vanish.
+    Returns the job.
     """
     if source not in ("url", "file"):
         raise ValueError("source must be 'url' or 'file'")
@@ -121,34 +142,35 @@ def queue_swagger_import(collection, *, source="url", spec_name="", spec_text=No
     dispatched = False
     result = None
 
-    # In DEBUG (local dev) run inline: no broker/worker required and results are
-    # immediate. In production hand off to a Celery worker so big specs never block
-    # the API process.
-    if not getattr(settings, "DEBUG", False):
-        try:
-            from .tasks import import_swagger_task  # noqa: PLC0415 - deferred import
+    # Hand the job to a Celery worker whenever one is reachable. There is no DEBUG
+    # gate here: a deployed host that accidentally runs with DEBUG=True must still
+    # use the queue. If no broker/worker answers, fall back to an in-process run so
+    # an import never blocks the web request and never silently vanishes.
+    try:
+        from .tasks import import_swagger_task  # noqa: PLC0415 - deferred import
 
-            result = import_swagger_task.delay(str(job.id))
-            # Confirm a live worker actually starts the task. If nothing starts
-            # (broker up but no worker, or a stale worker) fall back to running
-            # inline so a job never sits in 'queued' forever. run_swagger_import is
-            # idempotent, so a slow-but-real worker racing us is harmless.
-            for _ in range(6):  # up to ~1.5s
-                try:
-                    state = result.state
-                except Exception:
-                    state = "PENDING"
-                    break
-                if state in ("STARTED", "SUCCESS", "RETRY"):
-                    dispatched = True
-                    break
-                if state == "FAILURE":
-                    break  # stale/mismatched worker — let the inline run handle it
-                time.sleep(0.25)
-        except Exception as exc:  # noqa: BLE001 - broker down / celery not installed
-            logger.warning(
-                "Celery dispatch unavailable for import job %s (%s); running inline.", job.id, exc
-            )
+        result = import_swagger_task.delay(str(job.id))
+        # Confirm a live worker actually starts the task. If nothing starts
+        # (broker up but no worker, or a stale worker) fall back to an in-process
+        # run so a job never sits in 'queued' forever. run_swagger_import is
+        # idempotent and skips rows a live worker already owns, so a slow-but-real
+        # worker racing us is harmless.
+        for _ in range(6):  # up to ~1.5s
+            try:
+                state = result.state
+            except Exception:
+                state = "PENDING"
+                break
+            if state in ("STARTED", "SUCCESS", "RETRY"):
+                dispatched = True
+                break
+            if state == "FAILURE":
+                break  # stale/mismatched worker — let the in-process run handle it
+            time.sleep(0.25)
+    except Exception as exc:  # noqa: BLE001 - broker down / celery not installed
+        logger.warning(
+            "Celery dispatch unavailable for import job %s (%s); running in-process.", job.id, exc
+        )
 
     if not dispatched:
         if result is not None:
@@ -156,6 +178,45 @@ def queue_swagger_import(collection, *, source="url", spec_name="", spec_text=No
                 result.revoke(terminate=False)
             except Exception:  # noqa: BLE001
                 pass
-        run_swagger_import(job)
+        if getattr(settings, "DEBUG", False):
+            # Local dev: finish synchronously so results are immediate and predictable.
+            run_swagger_import(job)
+        else:
+            # Deployed host with no reachable worker: don't make the caller wait for
+            # a potentially huge spec. Parse on a daemon thread and surface progress
+            # through the ImportJob row exactly like a Celery run would.
+            threading.Thread(
+                target=run_swagger_import,
+                args=(job,),
+                daemon=True,
+                name=f"import-{job.id}",
+            ).start()
 
     return job
+
+
+def reap_stale_jobs(user=None, collection=None, *, seconds=STALE_JOB_AFTER_SECONDS):
+    """
+    Mark ImportJobs stuck in queued/running as failed once nothing finished them
+    within ``seconds``. This stops orphaned rows (worker OOM-killed, container
+    restarted) from 409-blocking new imports and from keeping the UI's progress
+    toast spinning forever. Idempotent and cheap, so it is safe to call from read
+    paths; a live-but-slow worker is never touched because the window is far
+    beyond Celery's own soft time limit.
+    """
+    cutoff = timezone.now() - timedelta(seconds=seconds)
+    qs = ImportJob.objects.filter(status__in=("queued", "running"), created_at__lt=cutoff)
+    if collection is not None:
+        qs = qs.filter(collection=collection)
+    elif user is not None:
+        qs = qs.filter(collection__project__user=user)
+
+    stale = list(qs[:50])
+    for job in stale:
+        job.status = "failed"
+        job.error = "Import was interrupted (no worker finished it in time). Please try again."
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "error", "finished_at"])
+    if stale:
+        logger.warning("Reaped %d stale import job(s) older than %ss.", len(stale), seconds)
+    return stale
