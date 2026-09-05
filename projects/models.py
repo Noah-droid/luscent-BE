@@ -18,6 +18,36 @@ class Project(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+    # Structured Context for AI Agents
+    AUTH_TYPE_CHOICES = [
+        ('none', 'None'),
+        ('api_key', 'API Key'),
+        ('session', 'Session/Cookie'),
+        ('jwt', 'JWT'),
+        ('oauth', 'OAuth'),
+        ('custom', 'Custom'),
+    ]
+    auth_type = models.CharField(max_length=50, choices=AUTH_TYPE_CHOICES, default='none', blank=True,
+        help_text='Primary authentication mechanism')
+    tech_stack = models.JSONField(default=dict, blank=True,
+        help_text='Structured tech stack: {"frontend": "React", "backend": "Django", "database": "Postgres"}')
+    preferred_test_types = models.JSONField(default=list, blank=True,
+        help_text='Preferred test scenarios: ["HAPPY_PATH", "SECURITY", "VALIDATION_ERROR", "EDGE_CASE", "PERFORMANCE", "SMOKE", "REGRESSION", "E2E"]')
+    critical_flows = models.JSONField(default=list, blank=True,
+        help_text='Prioritized user flows: [{"name": "Login", "priority": "P0", "description": "..."}]')
+    domain_rules = models.TextField(blank=True, null=True,
+        help_text='Business rules and domain constraints for the agent')
+    
+    # Target
+    target_url = models.URLField(blank=True, null=True,
+        help_text='Primary target application URL for testing')
+
+    # API Spec Import
+    swagger_url = models.URLField(blank=True, null=True,
+        help_text='URL to OpenAPI/Swagger spec for auto-importing endpoints')
+    postman_collection = models.JSONField(default=None, blank=True, null=True,
+        help_text='Parsed Postman collection JSON for auto-importing endpoints')
+
     # Advanced: Repo Integration (Whitebox Testing)
     repo_url = models.URLField(blank=True, null=True, help_text="GitHub/GitLab repository URL for white-box testing")
     repo_branch = models.CharField(max_length=100, default='main', blank=True, help_text="Branch to clone")
