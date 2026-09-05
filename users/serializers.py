@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate
-from .models import User, APIToken
+from .models import User, APIToken, TestCredential
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -29,6 +29,21 @@ class RegisterSerializer(serializers.ModelSerializer):
         if data['password'] != data['confirm_password']:
             raise serializers.ValidationError({"password": "Passwords do not match"})
         return data
+
+
+class TestCredentialSerializer(serializers.ModelSerializer):
+    project_name = serializers.ReadOnlyField(source='project.name', default=None)
+    scope_label = serializers.ReadOnlyField()
+
+    class Meta:
+        model = TestCredential
+        fields = ['id', 'provider', 'email', 'password', 'metadata', 'description', 'is_active', 'project', 'project_name', 'scope_label', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'password': {'write_only': True, 'required': False},
+            'email': {'required': False},
+            'project': {'required': False, 'allow_null': True},
+        }
     
     def create(self, validated_data):
         validated_data.pop('confirm_password')
@@ -92,3 +107,18 @@ class ResetPasswordSerializer(serializers.Serializer):
         if data['password'] != data['confirm_password']:
             raise serializers.ValidationError({"password": "Passwords do not match"})
         return data
+
+
+class TestCredentialSerializer(serializers.ModelSerializer):
+    project_name = serializers.ReadOnlyField(source='project.name', default=None)
+    scope_label = serializers.ReadOnlyField()
+
+    class Meta:
+        model = TestCredential
+        fields = ['id', 'provider', 'email', 'password', 'metadata', 'description', 'is_active', 'project', 'project_name', 'scope_label', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'password': {'write_only': True, 'required': False},
+            'email': {'required': False},
+            'project': {'required': False, 'allow_null': True},
+        }
