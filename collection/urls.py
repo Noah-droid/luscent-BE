@@ -4,11 +4,15 @@ from .views import (
     CollectionDetailView,
     EndpointListCreateView,
     EndpointDetailView,
+    ImportJobListView,
     SwaggerImportView,
     CrawlerImportView
 )
 
 urlpatterns = [
+    # Import job progress (active + recently finished)
+    path("import-jobs/", ImportJobListView.as_view(), name="import-job-list"),
+
     # Collection management
     path("projects/<uuid:project_id>/", CollectionListCreateView.as_view(), name="collection-list-create"),
     path("<uuid:pk>/", CollectionDetailView.as_view(), name="collection-detail"),
