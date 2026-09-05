@@ -13,7 +13,9 @@ from .views import (
     GithubReposView,
     ForgotPasswordView,
     ResetPasswordView,
-    OnboardingView
+    OnboardingView,
+    TestCredentialListCreateView,
+    TestCredentialDetailView
 )
 
 app_name = 'users'
@@ -33,4 +35,6 @@ urlpatterns = [
     path('forgot-password/', ForgotPasswordView.as_view(), name='forgot-password'),
     path('reset-password/', ResetPasswordView.as_view(), name='reset-password'),
     path('onboarding/', OnboardingView.as_view(), name='onboarding'),
+    path('credentials/', TestCredentialListCreateView.as_view(), name='credentials'),
+    path('credentials/<int:pk>/', TestCredentialDetailView.as_view(), name='credential-detail'),
 ]
