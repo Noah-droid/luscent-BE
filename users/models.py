@@ -64,7 +64,13 @@ class APIToken(models.Model):
             self.token = self.generate_token()
         super().save(*args, **kwargs)
 class TestCredential(models.Model):
-    """Global credentials for agents to use when encountering 3rd party auth"""
+    """Credentials for agents to use when encountering 3rd party auth.
+
+    Credentials are scoped to a single project whenever possible (the model
+    the QA agent actually runs against), so test secrets live with the project
+    they belong to instead of being copied across the board. A credential with
+    ``project=None`` is a shared, org-wide credential managed by staff.
+    """
     PROVIDER_CHOICES = [
         ('google', 'Google'),
         ('github', 'GitHub'),
@@ -78,12 +84,24 @@ class TestCredential(models.Model):
     metadata = models.JSONField(default=dict, blank=True, help_text="Extra config like client_id, secret, or specific target domains")
     description = models.TextField(blank=True, null=True, help_text="Context on where and why to use these credentials")
     is_active = models.BooleanField(default=True)
+    project = models.ForeignKey(
+        'projects.Project',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='test_credentials',
+        help_text='Project this credential is scoped to. Empty = shared across projects (staff-managed).'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = "Global Agent Credential"
-        verbose_name_plural = "Global Agent Credentials"
+        verbose_name = "Agent Credential"
+        verbose_name_plural = "Agent Credentials"
+
+    @property
+    def scope_label(self):
+        return 'shared' if self.project_id is None else 'project'
 
     def _get_fernet(self):
         # Derive a 32-byte key from SECRET_KEY
