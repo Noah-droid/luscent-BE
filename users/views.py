@@ -4,7 +4,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework import exceptions
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import User, APIToken
+from .models import User, APIToken, TestCredential
 from .serializers import (
     UserSerializer,
     RegisterSerializer,
@@ -13,7 +13,8 @@ from .serializers import (
     GithubLoginSerializer,
     ForgotPasswordSerializer,
     ResetPasswordSerializer,
-    OnboardingSerializer
+    OnboardingSerializer,
+    TestCredentialSerializer
 )
 import requests
 from django.conf import settings
@@ -703,3 +704,94 @@ class OnboardingView(APIView):
             'message': 'Onboarding complete',
             'user': UserSerializer(user).data
         }, status=status.HTTP_200_OK)
+
+
+def _visible_credentials(user):
+    """
+    Credentials the user can see:
+      - shared (project-less) credentials, and
+      - credentials scoped to projects the user owns.
+    """
+    from django.db.models import Q
+    from projects.models import Project
+    owned = Project.objects.filter(user=user).values_list('id', flat=True)
+    return TestCredential.objects.filter(
+        Q(project__isnull=True) | Q(project_id__in=owned)
+    )
+
+
+def _assert_can_manage(user, project_id, require_project=False):
+    """Staff manage shared creds; project owners manage their project's creds."""
+    from projects.models import Project
+    if user.is_staff:
+        return
+    if not project_id:
+        raise exceptions.PermissionDenied(
+            'Shared credentials can only be managed by staff. Add this credential to your project instead.'
+        )
+    if not Project.objects.filter(id=project_id, user=user).exists():
+        raise exceptions.PermissionDenied('You can only manage credentials for your own projects.')
+    if require_project:
+        return
+
+
+class TestCredentialListCreateView(generics.ListCreateAPIView):
+    """
+    List or create agent credentials.
+
+    Credentials are project-scoped: each user manages the test logins and
+    tokens for their own projects, and staff additionally manage shared
+    (org-wide) credentials. Pass `?project=<uuid>` to scope the listing.
+    """
+    serializer_class = TestCredentialSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        from django.db.models import Q
+        project_param = self.request.query_params.get('project')
+        if self.request.user.is_staff:
+            qs = TestCredential.objects.all()
+        else:
+            qs = _visible_credentials(self.request.user)
+        if project_param:
+            qs = qs.filter(Q(project_id=project_param) | Q(project__isnull=True))
+        return qs.order_by('-created_at')
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data.get('project')
+        _assert_can_manage(
+            self.request.user,
+            getattr(project, 'id', None) if project else None,
+        )
+        if project is None and not self.request.user.is_staff:
+            raise exceptions.PermissionDenied(
+                'Shared credentials can only be created by staff. Scope this credential to a project.'
+            )
+        serializer.save()
+
+
+class TestCredentialDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Update (e.g. toggle is_active) or delete an agent credential."""
+    serializer_class = TestCredentialSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return TestCredential.objects.all()
+        return _visible_credentials(self.request.user)
+
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        # You must be able to manage the credential's current scope AND the
+        # scope it is being moved to.
+        new_project = serializer.validated_data.get('project')
+        _assert_can_manage(self.request.user, instance.project_id)
+        if new_project is not None and (
+            not instance.project_id or new_project.id != instance.project_id
+        ):
+            _assert_can_manage(self.request.user, new_project.id)
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        _assert_can_manage(self.request.user, instance.project_id)
+        instance.delete()
