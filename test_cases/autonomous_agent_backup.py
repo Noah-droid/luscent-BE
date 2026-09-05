@@ -781,10 +781,18 @@ run()
             return {"error": str(e)}
 
     def _fetch_global_credentials(self):
-        """Retrieves managed accounts for external auth from the DB."""
+        """
+        Retrieves managed accounts for external auth from the DB.
+
+        Credentials are scoped: shared (project-less) creds apply everywhere,
+        plus any credentials that were saved against this mission's project.
+        """
         try:
+            from django.db.models import Q
             from users.models import TestCredential
-            creds = TestCredential.objects.filter(is_active=True)
+            creds = TestCredential.objects.filter(is_active=True).filter(
+                Q(project__isnull=True) | Q(project_id=self.collection.project_id)
+            )
             return [
                 {
                     "provider": c.provider,
