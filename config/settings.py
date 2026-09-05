@@ -221,10 +221,14 @@ SIMPLE_JWT = {
 
 LLM_API_KEY = config('LLM_API_KEY', default=None)
 LLM_BASE_URL = config('LLM_BASE_URL', default="https://api.openai.com/v1")
-LLM_PROVIDER = config('LLM_PROVIDER', default="gemini") # openai or gemini
+LLM_PROVIDER = config('LLM_PROVIDER', default="gemini") # openai, gemini, or nvidia
 GEMINI_API_KEY = config('GEMINI_API_KEY', default=None)
 GEMINI_MODEL = config('GEMINI_MODEL', default='gemini-3.5-flash')
 OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o-mini')
+NVIDIA_API_KEY = config('NVIDIA_API_KEY', default=None)
+NVIDIA_NIM_API_KEY = config('NVIDIA_NIM_API_KEY', default=config('NVIDIA_API_KEY', default=None))
+NVIDIA_MODEL = config('NVIDIA_MODEL', default='nvidia/nemotron-3-nano-omni-30b-a3b-reasoning')
+NVIDIA_BASE_URL = config('NVIDIA_BASE_URL', default=None)
 
 # litellm Configuration
 import litellm
