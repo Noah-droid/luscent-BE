@@ -1,9 +1,11 @@
 import logging
+import os
 import time
-import requests
 import re
 import json
+import requests
 from django.conf import settings
+import litellm
 from .models import AgentMission, AgentMissionStep, AgentPrompt
 
 try:
@@ -12,6 +14,8 @@ except ImportError:
     Sandbox = None
 
 logger = logging.getLogger(__name__)
+
+
 
 class AutonomousAgent:
     """
@@ -25,6 +29,7 @@ class AutonomousAgent:
         self.user_story = user_story or "Explore the API and ensure core functionality works."
         self.env_vars = env_vars or {}
         self.browser_process = None # Persistent browser process for live view
+        self.previous_failures = [] # Populated for regression missions
         
         # Mission Context (Determines the agent's focus)
         self.scenarios = scenarios or "HAPPY_PATH"
@@ -41,13 +46,29 @@ class AutonomousAgent:
         self.provider = getattr(settings, 'LLM_PROVIDER', 'gemini').lower() 
         self.openai_api_key = getattr(settings, 'LLM_API_KEY', None)
         self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)
+        self.nvidia_api_key = getattr(settings, 'NVIDIA_NIM_API_KEY', None)
         self.e2b_api_key = getattr(settings, 'E2B_API_KEY', None)
         self.sandbox_template = getattr(settings, 'E2B_SANDBOX_TEMPLATE', 'qai-runner')
         
+        # litellm model naming: prefix provider for auto-routing
         if self.provider == "gemini":
-            self.model = getattr(settings, 'GEMINI_MODEL', 'gemini-2.5-flash')
+            raw_model = getattr(settings, 'GEMINI_MODEL', 'gemini-3.5-flash')
+            self.model = raw_model if raw_model.startswith('gemini/') else f'gemini/{raw_model}'
+        elif self.provider == "nvidia":
+            raw_model = getattr(settings, 'NVIDIA_MODEL', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning')
+            self.model = raw_model if raw_model.startswith('nvidia_nim/') else f'nvidia_nim/{raw_model}'
         else:
-            self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
+            raw_model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
+            self.model = raw_model  # OpenAI models don't need a prefix
+        
+        # Propagate API keys to env for litellm auto-detection
+        if self.gemini_api_key:
+            os.environ['GEMINI_API_KEY'] = self.gemini_api_key
+        if self.openai_api_key:
+            os.environ['OPENAI_API_KEY'] = self.openai_api_key
+        if self.nvidia_api_key:
+            os.environ['NVIDIA_NIM_API_KEY'] = self.nvidia_api_key
+            os.environ['NVIDIA_API_KEY'] = self.nvidia_api_key
 
         # Agent Memory
         self.history = [] 
@@ -59,6 +80,37 @@ class AutonomousAgent:
         
         if self.env_vars:
             self.extracted_vars.update(self.env_vars)
+
+        # Internal state for browser manager
+        self.browser_process = None
+        self._browser_manager_failed = False
+        self.previous_failures = []
+
+    def _sandbox_file_write(self, path, content, retries=3):
+        """Write a file to the sandbox with retry logic for 502/transient errors."""
+        for attempt in range(retries):
+            try:
+                self.sandbox.files.write(path, content)
+                return True
+            except Exception as e:
+                logger.warning(f"[Agent] File write attempt {attempt + 1} failed for {path}: {e}")
+                if attempt < retries - 1:
+                    time.sleep(2)
+                    # Check if sandbox is still alive
+                    try:
+                        self.sandbox.commands.run("echo ok", timeout=5)
+                    except Exception:
+                        logger.error(f"[Agent] Sandbox appears dead, cannot write {path}")
+                        return False
+        return False
+
+    def _sandbox_health_check(self):
+        """Quick check that the sandbox is responsive."""
+        try:
+            result = self.sandbox.commands.run("echo healthy", timeout=5)
+            return result.exit_code == 0
+        except Exception:
+            return False
 
     def run_mission(self, max_steps=10):
         """
@@ -74,6 +126,16 @@ class AutonomousAgent:
                 mission.status = "running"
                 mission.save()
                 self.browser_config = mission.browser_config or {}
+                
+                # LOAD REGRESSION CONTEXT: If previous_session is linked,
+                # pull the failed steps so the agent knows exactly what to re-test
+                if mission.previous_session:
+                    prev = mission.previous_session
+                    failed_steps = prev.steps.filter(status='failed').values(
+                        'step_number', 'action_type', 'thought', 'response_status', 'response_body'
+                    )
+                    self.previous_failures = list(failed_steps)
+                    logger.info(f"[Agent] Loaded {len(self.previous_failures)} past failures from session {prev.batch_id}")
             except AgentMission.DoesNotExist:
                 logger.warning(f"[Agent] Mission ID {self.mission_id} not found.")
 
@@ -81,7 +143,7 @@ class AutonomousAgent:
         # We now include the schema and ensure IDs are strings for the JSON prompt.
         endpoints_raw = list(self.collection.endpoints.values(
             'id', 'method', 'url', 'name', 'description', 
-            'request_body', 'query_params'
+            'request_body', 'query_params', 'auth_type', 'headers'
         ))
         
         # Format for AI: Convert UUIDs to strings and clean up
@@ -101,28 +163,64 @@ class AutonomousAgent:
         else:
             try:
                 logger.info(f"[Agent] Spawning sandbox environment: {self.sandbox_template}")
-                self.sandbox = Sandbox.create(
-                    template=self.sandbox_template, 
-                    api_key=self.e2b_api_key
-                )
-                
-                # Detect Live View (VNC) URL for Desktop templates
-                if mission:
+                # Retry sandbox creation up to 3 times — E2B can transient-fail
+                self.sandbox = None
+                for _sandbox_attempt in range(3):
                     try:
-                        # Many E2B GUI templates expose noVNC on port 80
-                        vnc_host = self.sandbox.get_host(80)
-                        mission.session_url = f"https://{vnc_host}"
-                        mission.save()
-                        logger.info(f"[Agent] Live View URL mapped: {mission.session_url}")
-                    except:
-                        pass
+                        self.sandbox = Sandbox.create(
+                            template=self.sandbox_template,
+                            api_key=self.e2b_api_key,
+                            timeout=900  # 15 minutes — long enough for QA missions with VNC
+                        )
+                        break
+                    except Exception as se:
+                        logger.warning(f"[Agent] Sandbox create attempt {_sandbox_attempt + 1} failed: {se}")
+                        if _sandbox_attempt < 2:
+                            time.sleep(3)
+                        else:
+                            raise
 
-                # If we have a repo linked, set it up immediately
+                # Extend timeout during execution — QA missions can take a while
+                try:
+                    self.sandbox.set_timeout(900)
+                except Exception:
+                    pass  # Not all SDK versions support this
+                
+                # Store mission reference and initialise URL holders
+                self._current_mission = mission
+                self._vnc_url = None   # set by _start_gui_stack
+                self._app_url = None   # set by _execute_whitebox_setup
+
+                # If we have a repo linked, clone + start the app FIRST so
+                # port 80 isn't taken by the app before VNC claims it.
                 if mission and mission.collection.project.repo_url:
                     self._execute_whitebox_setup(mission.collection.project, mission)
-                # Ensure playwright binaries are present
+
+                # Start GUI stack (Xvfb + VNC) for live view — runs AFTER
+                # whitebox so the VNC URL is the one persisted to session_url
+                # (used by the frontend iframe for live visual monitoring).
+                self._start_gui_stack()
+
+                # Persist URLs to the mission model
+                if mission:
+                    # session_url → VNC live view (iframe)
+                    if self._vnc_url:
+                        mission.session_url = self._vnc_url
+                    # If no VNC fell back to the app URL
+                    elif self._app_url:
+                        mission.session_url = self._app_url
+                    # app_url → direct link to the user's running app
+                    if self._app_url:
+                        mission.app_url = self._app_url
+                    mission.save()
+                    logger.info(f"[Agent] Mission session_url={mission.session_url}  app_url={mission.app_url}")
+
+                # Health check before browser init — sandbox may have died during GUI stack setup
                 if "browser" in self.runner_types:
-                    self._init_browser_manager()
+                    if self._sandbox_health_check():
+                        self._init_browser_manager()
+                    else:
+                        logger.error("[Agent] Sandbox unhealthy after GUI stack — skipping browser manager")
                 
             except Exception as e:
                 logger.error(f"[Agent] Failed to spawn sandbox: {e}")
@@ -139,8 +237,19 @@ class AutonomousAgent:
         try:
             # 3. The Loop
             for step_i in range(1, max_steps + 1):
-                # 3a. Check for user prompts (Live Interaction)
+                # 3a. Check for user prompts (Live Interaction) + pause/resume handling
                 if mission:
+                    # RELOAD mission status to detect pause/resume from UI
+                    mission.refresh_from_db()
+                    
+                    # If paused by human takeover, spin-wait until resumed
+                    while mission.status == 'paused':
+                        logger.info(f"[Agent] Mission paused — waiting for human takeover to resume...")
+                        time.sleep(5)
+                        mission.refresh_from_db()
+                        if mission.status == 'error':
+                            logger.info("[Agent] Mission was killed while paused.")
+                            return steps_log                    # Check for new prompts (including takeover signals)
                     new_prompts = AgentPrompt.objects.filter(mission=mission, is_processed=False).order_by('created_at')
                     for p in new_prompts:
                         logger.info(f"[Agent] Received User Guidance: {p.prompt}")
@@ -148,12 +257,41 @@ class AutonomousAgent:
                         p.is_processed = True
                         p.save()
 
+                    # Check if mission was stopped by user
+                    if mission.status == 'error':
+                        logger.info("[Agent] Mission was stopped by user.")
+                        return steps_log
+
                 logger.info(f"--- [Step {step_i}/{max_steps}] Thinking ---")
                 
                 action = self._get_next_action()
                 reason = action.get('reason', 'No reason provided')
                 action_type = action.get('type', 'UNKNOWN')
                 logger.info(f"[Agent Decision] Type: {action_type} | Reason: {reason}")
+                
+                # SCENARIO ENFORCEMENT: If agent strays from selected scenarios, redirect it
+                if self.scenarios and action_type != 'FINISH' and action_type != 'ERROR':
+                    selected = [s.upper().replace(' ', '_').replace('-', '_') for s in (self.scenarios if isinstance(self.scenarios, list) else [self.scenarios])]
+                    reason_upper = (reason + ' ' + str(action.get('details', {}))).upper()
+                    # Check if reason mentions a scenario NOT in the selected list
+                    ALL_SCENARIOS = {'HAPPY_PATH', 'SECURITY', 'VALIDATION_ERROR', 'EDGE_CASE', 'PERFORMANCE', 'SMOKE', 'REGRESSION', 'E2E'}
+                    mentioned = ALL_SCENARIOS & set(re.findall(r'\b(' + '|'.join(ALL_SCENARIOS) + r')\b', reason_upper))
+                    off_topic = mentioned - set(selected)
+                    if off_topic:
+                        logger.warning(f"[Agent] Scenario drift detected: {off_topic}. Redirecting to selected: {selected}")
+                        self._record_observation(
+                            f"IMPORTANT: You are straying from the assigned scenarios. "
+                            f"Your assigned scenarios are ONLY: {', '.join(selected)}. "
+                            f"You mentioned {', '.join(off_topic)} which are NOT assigned. "
+                            f"Please refocus ONLY on: {', '.join(selected)}."
+                        )
+                        correction_count += 1
+                        if correction_count >= 3:
+                            # After 3 drifts, force FINISH to prevent wasted tokens
+                            logger.info("[Agent] Too many scenario drifts — forcing mission completion.")
+                            action = {"type": "FINISH", "reason": f"Completed assigned scenarios: {', '.join(selected)}"}
+                        else:
+                            continue
                 
                 if action.get("type") == "FINISH":
                     logger.info(f"[Agent] Mission Complete: {action.get('reason')}")
@@ -316,8 +454,7 @@ class AutonomousAgent:
         try:
             # E2B creates a public URL for exposed ports
             exposed_url = self.sandbox.get_host(target_port)
-            mission.session_url = f"https://{exposed_url}"
-            mission.save()
+            self._app_url = f"https://{exposed_url}"
             
             # Make sure the Agent knows the new local base URL
             self.extracted_vars["LOCAL_APP_URL"] = "http://localhost:" + str(target_port)
@@ -329,12 +466,13 @@ class AutonomousAgent:
                 action_type="SHELL_COMMAND",
                 thought="I have successfully cloned the repository, injected the environment variables, and started the app in the sandbox.",
                 details={"command": clone_cmd + " && " + start_cmd},
-                response_body=f"App is running locally at {self.extracted_vars['LOCAL_APP_URL']} and exposed publicly at {mission.session_url}",
+                response_body=f"App is running locally at {self.extracted_vars['LOCAL_APP_URL']} and exposed publicly at {self._app_url}",
                 response_status=0,
                 status="passed"
             )
-            logger.info(f"[Agent] (WhiteBox) Server running successfully at {mission.session_url}")
+            logger.info(f"[Agent] (WhiteBox) Server running successfully at {self._app_url}")
         except Exception as e:
+            self._app_url = None
             logger.error(f"[Agent] (WhiteBox) Failed to get host URL: {e}")
 
     def _execute_api_call(self, action, endpoint_map):
@@ -394,7 +532,9 @@ except Exception as e:
     def _run_in_sandbox_or_host(self, script):
         """Helper to run a python snippet in the sandbox or fallback to local."""
         if self.sandbox:
-            self.sandbox.files.write("/home/user/agent_temp.py", script)
+            if not self._sandbox_file_write("/home/user/agent_temp.py", script):
+                logger.error("[Agent] Failed to write temp script to sandbox")
+                return None
             # Force environment variables for the one-off script
             cmd = "export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright && export DISPLAY=:1 && python3 /home/user/agent_temp.py"
             res = self.sandbox.commands.run(cmd)
@@ -405,96 +545,220 @@ except Exception as e:
         else:
             return {"error": "Native execution failed. Sandbox required."}
 
+    def _start_gui_stack(self):
+        """Start Xvfb + fluxbox + x11vnc + noVNC as persistent background processes.
+
+        Strategy: upload a SINGLE setup script via ``sandbox.files.write`` (HTTP,
+        no deadline issues) and execute it once with ``background=True``.  Then
+        poll readiness by reading a marker file via ``sandbox.files.read`` (also
+        HTTP) instead of calling ``commands.run`` for each ``pgrep`` / ``ss``
+        check — every ``commands.run`` call goes through E2B's gRPC channel which
+        has a hard ~5 s backend deadline that we cannot control.
+        """
+        logger.info("[Agent] Starting GUI stack (Xvfb + VNC)...")
+        if not self.sandbox:
+            logger.error("[Agent] No sandbox available for GUI stack.")
+            self._vnc_url = None
+            return
+
+        # --- 1. Upload the setup script via HTTP (reliable, no deadline) ----------
+        gui_setup_script = r"""#!/bin/bash
+set -e
+
+# Kill any stale daemons
+pkill -x Xvfb 2>/dev/null || true
+pkill -x x11vnc 2>/dev/null || true
+pkill -x fluxbox 2>/dev/null || true
+pkill -x websockify 2>/dev/null || true
+sleep 0.5
+
+# 1. Xvfb — virtual framebuffer
+echo 'Starting Xvfb...' > /tmp/gui_setup.log
+Xvfb :1 -screen 0 1280x1024x24 > /tmp/xvfb.log 2>&1 &
+for i in $(seq 1 20); do
+  if pgrep -x Xvfb >/dev/null 2>&1; then
+    echo 'Xvfb UP' >> /tmp/gui_setup.log
+    break
+  fi
+  sleep 0.5
+done
+
+# 2. fluxbox — window manager
+DISPLAY=:1 fluxbox > /tmp/fluxbox.log 2>&1 &
+sleep 1
+
+# 3. x11vnc — VNC server
+DISPLAY=:1 x11vnc -display :1 -nopw -forever -shared -rfbport 5900 > /tmp/x11vnc.log 2>&1 &
+for i in $(seq 1 20); do
+  if pgrep -x x11vnc >/dev/null 2>&1; then
+    echo 'x11vnc UP' >> /tmp/gui_setup.log
+    break
+  fi
+  sleep 0.5
+done
+
+# 4. noVNC via websockify — probe known paths
+NOVNC_PATH=''
+for p in /usr/share/novnc /usr/share/novnc/web /usr/share/websockify; do
+  if [ -f "$p/vnc.html" ] || [ -f "$p/vnc_lite.html" ]; then
+    NOVNC_PATH="$p"
+    break
+  fi
+done
+
+if [ -n "$NOVNC_PATH" ]; then
+  echo "noVNC found at $NOVNC_PATH" >> /tmp/gui_setup.log
+  DISPLAY=:1 websockify --web "$NOVNC_PATH" 80 localhost:5900 > /tmp/websockify.log 2>&1 &
+else
+  echo 'noVNC web files not found, starting websockify without web UI' >> /tmp/gui_setup.log
+  websockify 80 localhost:5900 > /tmp/websockify.log 2>&1 &
+fi
+
+# 5. Wait for port 80 to be listening
+for i in $(seq 1 30); do
+  if ss -tlnp 2>/dev/null | grep -q ':80 '; then
+    echo 'port80 OPEN' >> /tmp/gui_setup.log
+    break
+  fi
+  sleep 1
+done
+
+# 6. Write readiness marker — we read this via sandbox.files.read (HTTP)
+echo "DONE" > /tmp/gui_ready
+echo "GUI stack setup complete" >> /tmp/gui_setup.log
+cat /tmp/gui_setup.log >> /tmp/gui_setup_full.log
+"""
+        try:
+            self._sandbox_file_write("/home/user/setup_gui.sh", gui_setup_script)
+        except Exception as e:
+            logger.error(f"[Agent] Failed to upload GUI setup script: {e}")
+            self._vnc_url = None
+            return
+
+        # --- 2. Execute the script as ONE background command ---------------------
+        try:
+            self.sandbox.commands.run(
+                "chmod +x /home/user/setup_gui.sh && bash /home/user/setup_gui.sh",
+                background=True,
+            )
+        except Exception as e:
+            logger.error(f"[Agent] Failed to launch GUI setup script: {e}")
+            self._vnc_url = None
+            return
+
+        # --- 3. Poll readiness via HTTP (sandbox.files.read) — no gRPC deadline ---
+        gui_ready = False
+        for attempt in range(30):  # up to 30 s
+            try:
+                marker = self.sandbox.files.read("/tmp/gui_ready")
+                content = marker if isinstance(marker, str) else getattr(marker, "content", "")
+                if "DONE" in str(content):
+                    gui_ready = True
+                    logger.info(f"[Agent] GUI stack ready (poll #{attempt + 1})")
+                    break
+            except Exception:
+                pass  # file doesn't exist yet
+            time.sleep(1)
+
+        if not gui_ready:
+            # Read the log to understand what happened
+            try:
+                log_content = self.sandbox.files.read("/tmp/gui_setup.log")
+                log_str = log_content if isinstance(log_content, str) else getattr(log_content, "content", "")
+                logger.error(f"[Agent] GUI stack failed to become ready. Setup log:\n{log_str}")
+            except Exception:
+                logger.error("[Agent] GUI stack failed to become ready (no setup log available)")
+            self._vnc_url = None
+            return
+
+        # --- 4. Create E2B tunnel to port 80 -----------------------------------
+        try:
+            vnc_host = self.sandbox.get_host(80)
+            self._vnc_url = f"https://{vnc_host}"
+            logger.info(f"[Agent] VNC Live View ready at: {self._vnc_url}")
+        except Exception as e:
+            self._vnc_url = None
+            logger.warning(f"[Agent] Could not get VNC host URL: {e}")
+
+        # --- 5. Debug: dump tail of setup log -----------------------------------
+        try:
+            full_log = self.sandbox.files.read("/tmp/gui_setup_full.log")
+            log_str = full_log if isinstance(full_log, str) else getattr(full_log, "content", "")
+            if log_str:
+                logger.info(f"[Agent] GUI setup log:\n{log_str}")
+        except Exception:
+            pass
+
     def _init_browser_manager(self):
-        """Starts a persistent Playwright process and VNC server in the sandbox."""
+        """Starts a persistent Playwright process in the sandbox.
+        
+        When VNC is active, the browser ALWAYS launches non-headless so it
+        renders inside the Xvfb framebuffer — visible in the live VNC stream.
+        The user can watch the agent navigate and take over if needed.
+        """
         if not self.sandbox:
             return
 
         cfg = self.browser_config or {}
-        is_headless = cfg.get("headless", False) 
-
-        if not is_headless:
-            logger.info("[Agent] Starting VNC Display Server (Visual Mode)...")
-            try:
-                # Prepend env to GUI stack start
-                gui_cmd = (
-                    "export DISPLAY=:1 && "
-                    "Xvfb :1 -screen 0 1280x1024x24 & "
-                    "fluxbox & "
-                    "x11vnc -display :1 -nopw -forever -shared & "
-                    "/usr/share/novnc/utils/launch.sh --vnc localhost:5900 --listen 80 &"
-                )
-                # Start GUI stack with a longer connection timeout
-                self.sandbox.commands.run(gui_cmd, timeout=0) # Use 0 (no limit) for persistent background stacks
-                time.sleep(2) 
-            except Exception as e:
-                logger.error(f"[Agent] Failed to start GUI stack: {e}")
-
-        # 2. Start the Browser Manager script
-        script = f"""
-import json
-import base64
-import sys
-import os
-# Force global browser configs inside the python process
-os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/ms-playwright'
-os.environ['DISPLAY'] = ':1'
-from playwright.sync_api import sync_playwright
-
-def run():
-    with sync_playwright() as p:
-        # Launch using config
-        browser = p.chromium.launch(headless={is_headless})
-        context = browser.new_context(viewport={{'width': 1280, 'height': 800}})
-        page = context.new_page()
         
-        # Signal ready
-        print("READY", flush=True)
-        
-        for line in sys.stdin:
-            if not line.strip(): continue
-            try:
-                action = json.loads(line)
-                action_type = action.get('action')
-                
-                if action_type == 'navigate':
-                    page.goto(action.get('url'))
-                elif action_type == 'click':
-                    page.click(action.get('selector'))
-                elif action_type == 'type':
-                    page.fill(action.get('selector'), str(action.get('value')))
-                
-                page.wait_for_timeout(1000)
-                
-                # Capture result
-                screenshot = base64.b64encode(page.screenshot()).decode('utf-8')
-                print(json.dumps({{
-                    "status": "success",
-                    "title": page.title(),
-                    "screenshot_b64": screenshot,
-                    "html_preview": page.content()[:500]
-                }}), flush=True)
-            except Exception as e:
-                print(json.dumps({{"error": str(e)}}), flush=True)
-        browser.close()
-
-if __name__ == "__main__":
-    run()
-"""
+        # KEY FIX: If VNC/GUI stack is running, force headless=False so the
+        # browser renders in the framebuffer (visible via noVNC).
+        # If there's NO display (no Xvfb), we MUST run headless=True or the
+        # browser launch fails and we never get READY.
+        has_vnc = bool(getattr(self, '_vnc_url', None))
+        if has_vnc:
+            is_headless = False
+            logger.info("[Agent] VNC detected — running browser visible in live stream (headless=False).")
+        else:
+            is_headless = True
+            logger.info("[Agent] No VNC display available — running browser headless.")        # Start the Browser Manager script
+        # CRITICAL: Only set DISPLAY when running non-headless (VNC is up).
+        # Load browser manager template from file to avoid f-string escaping issues
+        # that caused SyntaxError: unterminated string literal in the inner script.
+        _tmplt = os.path.join(os.path.dirname(__file__), 'browser_manager_template.py')
+        with open(_tmplt, 'r') as _f:
+            _script = _f.read()
+        headless_str = str(is_headless)  # Must be True/False (Python bool), not true/false
+        display_line = 'os.environ["DISPLAY"] = ":1"' if not is_headless else '# Headless mode — no DISPLAY needed'
+        script = _script.replace('__HEADLESS__', headless_str).replace('__DISPLAY_LINE__', display_line)
         try:
-            self.sandbox.files.write("/home/user/browser_manager.py", script)
-            # Prepend env to one-off start command
-            bg_cmd = "export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright && export DISPLAY=:1 && python3 -u /home/user/browser_manager.py"
-            # Start persistent process in background to avoid hanging the agent
-            # Start persistent process in background
+            if not self._sandbox_file_write("/home/user/browser_manager.py", script):
+                logger.error("[Agent] Failed to write browser manager script — sandbox may be unhealthy")
+                return
+            # Only set DISPLAY when running non-headless (VNC/Xvfb is up)
+            if is_headless:
+                bg_cmd = "export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright && python3 -u /home/user/browser_manager.py"
+            else:
+                bg_cmd = "export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright && export DISPLAY=:1 && python3 -u /home/user/browser_manager.py"
             self.browser_process = self.sandbox.commands.run(bg_cmd, background=True)
-            # Wait for READY signal using the correct CommandHandle iterator
+            # Wait for READY signal with timeout (20s — Playwright launch can be slow)
+            ready = False
+            start = time.time()
             for out, err, pty in self.browser_process:
                 if out and "READY" in out:
-                    logger.info("[Agent] Persistent browser manager is READY.")
+                    logger.info("[Agent] Persistent browser manager is READY — visible in VNC live stream." if not is_headless else "[Agent] Persistent browser manager is READY (headless mode).")
+                    ready = True
                     break
+                if err and err.strip():
+                    logger.warning(f"[Agent] Browser manager stderr: {err.strip()}")
+                if time.time() - start > 20:
+                    logger.error("[Agent] Browser manager timed out waiting for READY signal (20s)")
+                    break
+            if not ready:
+                # Try to read the error log for debugging
+                try:
+                    err_content = self.sandbox.files.read("/tmp/browser_manager.err")
+                    err_str = err_content if isinstance(err_content, str) else getattr(err_content, "content", "")
+                    if err_str:
+                        logger.error(f"[Agent] Browser manager never sent READY. Error log: {str(err_str).strip()[:500]}")
+                    else:
+                        logger.error("[Agent] Browser manager never sent READY — no error log found")
+                except Exception:
+                    logger.error("[Agent] Browser manager never sent READY — falling back to ephemeral browser")
+                self.browser_process = None
         except Exception as e:
             logger.error(f"[Agent] Failed to start browser manager: {e}")
+            self.browser_process = None
 
     def _execute_browser_action(self, action):
         """Sends an action to the persistent browser manager."""
@@ -503,12 +767,26 @@ if __name__ == "__main__":
             self._ensure_playwright_browsers()
             self._playwright_verified = True
             
-        # Ensure browser manager is active
+        # Ensure browser manager is active — restart if it crashed
+        # But don't retry endlessly — if it failed once, go straight to legacy
         if not getattr(self, 'browser_process', None):
-            self._init_browser_manager()
+            if not getattr(self, '_browser_manager_failed', False):
+                self._init_browser_manager()
+                if not getattr(self, 'browser_process', None):
+                    self._browser_manager_failed = True
+                    logger.warning("[Agent] Browser manager permanently failed — using legacy browser for all browser actions")
+        else:
+            # Check if the process is still alive by trying to read
+            try:
+                # Quick health check — if pid is gone, restart
+                test_send = self.sandbox.commands.send_stdin(self.browser_process.pid, '\n')
+            except Exception:
+                logger.warning("[Agent] Browser process died — restarting...")
+                self.browser_process = None
+                self._init_browser_manager()
 
         if not getattr(self, 'browser_process', None):
-            # Fallback to old ephemeral method if persistent manager failed
+            # Fallback to ephemeral method if persistent manager failed
             return self._execute_browser_action_legacy(action)
 
         try:
@@ -538,12 +816,16 @@ if __name__ == "__main__":
             return {"error": str(e)}
 
     def _execute_browser_action_legacy(self, action):
-        """Original ephemeral browser execution (Fallback)."""
+        """Original ephemeral browser execution (Fallback).
+        When VNC is active, forces headless=False so the browser renders in the framebuffer.
+        """
         logger.info(f"[Agent] Using Legacy Ephemeral Browser for: {action.get('action')}")
         cfg = self.browser_config or {}
         b_type = (cfg.get("browser") or "chromium").lower()
         
-        is_headless = cfg.get("headless", True)
+        # KEY FIX: Respect VNC — if GUI stack is running, show the browser in VNC
+        has_vnc = bool(getattr(self, '_vnc_url', None))
+        is_headless = cfg.get("headless", True) and not has_vnc
         
         if b_type == "firefox":
             browser_type_override = f"browser = p.firefox.launch(headless={is_headless})"
@@ -591,13 +873,13 @@ def run():
         
         try:
             # Action
-            action_type = '{action.get("action")}'
+            action_type = {repr(action.get('action'))}
             if action_type == 'navigate':
-                page.goto('{action.get("url")}')
+                page.goto({repr(action.get('url'))})
             elif action_type == 'click':
-                page.click('{action.get("selector")}')
+                page.click({repr(action.get('selector'))})
             elif action_type == 'type':
-                page.fill('{action.get("selector")}', '{action.get("value")}')
+                page.fill({repr(action.get('selector'))}, {repr(action.get('value'))})
             
             page.wait_for_timeout(2000)
             
@@ -628,39 +910,18 @@ run()
         prompt = "Describe what you see on this screen. Identify any visible error messages, broken layouts, or if the page looks correct according to the action performed. Be concise."
         
         try:
-            if self.provider == "gemini":
-                # Use Gemini 1.5/2.5 Flash for vision
-                model_name = "gemini-1.5-flash" # Optimized for vision
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.gemini_api_key}"
-                payload = {
-                    "contents": [{
-                        "parts": [
-                            {"text": prompt},
-                            {"inline_data": {"mime_type": "image/png", "data": b64_image}}
-                        ]
-                    }]
-                }
-                resp = requests.post(url, json=payload, timeout=90)
-                resp.raise_for_status()
-                return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-            else:
-                # OpenAI Vision
-                url = "https://api.openai.com/v1/chat/completions"
-                payload = {
-                    "model": "gpt-4o-mini",
-                    "messages": [{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}
-                        ]
-                    }],
-                    "max_tokens": 300
-                }
-                headers = {"Authorization": f"Bearer {self.openai_api_key}", "Content-Type": "application/json"}
-                resp = requests.post(url, json=payload, headers=headers, timeout=30)
-                resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"]
+            response = litellm.completion(
+                model=self.model,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}
+                    ]
+                }],
+                max_tokens=300
+            )
+            return response.choices[0].message.content
         except Exception as e:
             logger.error(f"Vision Analysis Failed: {e}")
             return "Vision system unavailable, relying on HTML observation."
@@ -781,10 +1042,19 @@ run()
             return {"error": str(e)}
 
     def _fetch_global_credentials(self):
-        """Retrieves managed accounts for external auth from the DB."""
+        """
+        Retrieves managed accounts for external auth from the DB.
+
+        Credentials are scoped: shared (project-less) creds apply everywhere,
+        plus any credentials that were saved against this mission's project.
+        This keeps test logins out of unrelated projects.
+        """
         try:
+            from django.db.models import Q
             from users.models import TestCredential
-            creds = TestCredential.objects.filter(is_active=True)
+            creds = TestCredential.objects.filter(is_active=True).filter(
+                Q(project__isnull=True) | Q(project_id=self.collection.project_id)
+            )
             return [
                 {
                     "provider": c.provider,
@@ -799,6 +1069,131 @@ run()
             logger.error(f"[Agent] Failed to fetch global creds: {e}")
             return []
 
+    def _build_scenario_directives(self):
+        """Returns scenario-specific testing directives based on the active scenarios."""
+        directives = []
+        scenarios = self.scenarios if isinstance(self.scenarios, list) else [self.scenarios]
+        
+        scenario_guide = {
+            'HAPPY_PATH': (
+                "HAPPY PATH: Test the primary success flow end-to-end. "
+                "Start with authentication, then hit the core CRUD operations in logical order. "
+                "Verify 2xx responses, correct response bodies, and proper resource creation."
+            ),
+            'SECURITY': (
+                "SECURITY: Perform adversarial testing on every endpoint:\n"
+                "  - Broken Authentication: Call endpoints with no token, expired token, malformed token\n"
+                "  - IDOR: Change resource IDs in requests to access other users' data\n"
+                "  - Injection: Send SQL injection payloads in string fields (', \"; DROP TABLE--), XSS payloads (<script>alert(1)</script>)\n"
+                "  - Privilege Escalation: Access admin endpoints as a regular user\n"
+                "  - Mass Assignment: Add unexpected fields (role, is_admin, balance) to request bodies\n"
+                "  Expected: 401/403 for unauthorized access. Any 2xx for unauthorized is a VULNERABILITY."
+            ),
+            'EDGE_CASE': (
+                "EDGE CASES: Test boundary conditions and unusual inputs:\n"
+                "  - Empty strings, null values, extremely long strings (10000+ chars)\n"
+                "  - Negative numbers, zero, floats where ints expected\n"
+                "  - Unicode/emoji in text fields\n"
+                "  - Special characters: { }, [ ], < >, \\n\n\r\n"
+                "  - Very large numbers (Number.MAX_SAFE_INTEGER+)\n"
+                "  - Missing optional fields vs required fields"
+            ),
+            'VALIDATION_ERROR': (
+                "VALIDATION ERRORS: Test input validation thoroughly:\n"
+                "  - Send requests with missing required fields one at a time\n"
+                "  - Send wrong types (string where number expected, array where object expected)\n"
+                "  - Verify error responses include helpful messages and correct HTTP status codes\n"
+                "  - Check that invalid data is NOT persisted (GET the resource after failed POST)"
+            ),
+            'PERFORMANCE': (
+                "PERFORMANCE: Use STRESS_TEST tool to load-test critical endpoints:\n"
+                "  - Test with 10-50 concurrent users on key endpoints\n"
+                "  - Focus on endpoints that handle authentication, data creation, and search\n"
+                "  - Look for response times > 2s or error rates > 5%"
+            ),
+            'REGRESSION': (
+                "REGRESSION: Re-run previously failed test scenarios and verify fixes.\n"
+                "  - Look at the PAST FAILURES section below for specific failures to re-test\n"
+                "  - Re-execute the EXACT same actions that failed before\n"
+                "  - Verify each failure is now fixed (returns expected status/response)\n"
+                "  - If a past failure was a 500 error, confirm it now returns 2xx\n"
+                "  - If a past failure was a timeout, confirm the operation completes\n"
+                "  - Report each as FIXED or STILL BROKEN\n"
+                "  - Do NOT skip any past failure"
+            ),
+            'SMOKE': (
+                "SMOKE: Quick validation that core functionality works:\n"
+                "  - Test only the most critical 3-5 endpoints\n"
+                "  - Verify authentication works\n"
+                "  - Verify the main resource CRUD cycle\n"
+                "  - Stop after confirming basic functionality."
+            ),
+            'E2E': (
+                "E2E (End-to-End): Test complete user journeys through the full stack:\n"
+                "  - Use BROWSER_ACTION to navigate the UI\n"
+                "  - Combine API calls with browser interactions\n"
+                "  - Test the full flow: signup → login → create → view → edit → delete\n"
+                "  - Verify data persists across page refreshes"
+            ),
+        }
+        
+        for s in scenarios:
+            key = s.upper().replace(' ', '_').replace('-', '_')
+            if key in scenario_guide:
+                directives.append(f">> {scenario_guide[key]}")
+        
+        return '\n\n'.join(directives) if directives else ">> Follow the general instructions below."
+
+    def _build_regression_context(self):
+        """
+        Injects specific past failure context into the agent prompt.
+        When previous_failures is populated, the agent knows EXACTLY what to re-test.
+        """
+        if not self.previous_failures:
+            return ""
+
+        failures_text = "\n"
+        for i, f in enumerate(self.previous_failures, 1):
+            failures_text += (
+                f"  FAILURE #{i}:\n"
+                f"    Action: {f.get('action_type', 'UNKNOWN')}\n"
+                f"    What was attempted: {f.get('thought', 'No details')}\n"
+                f"    HTTP Status: {f.get('response_status', 'N/A')}\n"
+                f"    Error/Response: {(f.get('response_body') or '')[:300]}\n\n"
+            )
+
+        return (
+            "PAST FAILURES FROM PREVIOUS SESSION (Regression Baseline):\n"
+            f"The previous test session had {len(self.previous_failures)} failure(s). "
+            "Your PRIMARY job is to RE-TEST each of these failures and verify if they are now fixed.\n\n"
+            f"{failures_text}\n"
+            "REGRESSION RULES:\n"
+            "1. Re-run the EXACT same action type and endpoint that failed before.\n"
+            "2. If the failure was a specific HTTP status (e.g. 500), verify the same request now returns the correct status.\n"
+            "3. If the failure was a crash/timeout, retry the same operation.\n"
+            "4. Report each failure as FIXED (now passes) or STILL BROKEN (still fails).\n"
+            "5. Do NOT skip any past failure — test ALL of them.\n"
+            "6. After testing all past failures, you may explore new areas if time permits.\n"
+        )
+
+    SECRET_KEY_PATTERNS = ('key', 'secret', 'token', 'password', 'passwd', 'credential', 'auth', 'api', 'private')
+
+    @classmethod
+    def redact_env_vars(cls, env_vars):
+        """Mask secret-looking env var values before they reach the AI.
+        Returns names + masked values so the agent knows a var EXISTS (and can
+        reference it by name in sandbox shell commands) without the raw secret
+        ever leaving the platform."""
+        redacted = {}
+        for k, v in (env_vars or {}).items():
+            k_lower = k.lower()
+            if any(p in k_lower for p in cls.SECRET_KEY_PATTERNS):
+                masked = (str(v)[:3] + "****") if len(str(v)) > 6 else "****"
+                redacted[k] = f"[REDACTED - {masked}] (use sandbox env or credentials; do not ask the user)"
+            else:
+                redacted[k] = v
+        return redacted
+
     def _build_system_prompt(self, endpoints):
         # Tools are enabled based on runner_types
         has_http = "http" in self.runner_types
@@ -806,6 +1201,56 @@ run()
         has_load = "load" in self.runner_types
         
         creds = self._fetch_global_credentials()
+        
+        # Extract structured context from project
+        project = self.collection.project
+        auth_type = getattr(project, 'auth_type', 'none') or 'none'
+        tech_stack = getattr(project, 'tech_stack', {}) or {}
+        critical_flows = getattr(project, 'critical_flows', []) or []
+        domain_rules = getattr(project, 'domain_rules', '') or ''
+        
+        # Build structured context sections
+        auth_section = f"""
+AUTHENTICATION TYPE: {auth_type}
+"""
+        
+        tech_section = ""
+        if tech_stack:
+            tech_parts = []
+            for category in ['frontend', 'backend', 'database']:
+                items = tech_stack.get(category, [])
+                if items:
+                    tech_parts.append(f"- {category.title()}: {', '.join(items)}")
+            if tech_parts:
+                tech_section = f"""\nTECH STACK:
+{chr(10).join(tech_parts)}
+"""
+        
+        flows_section = ""
+        if critical_flows:
+            flow_lines = []
+            for f in critical_flows:
+                name = f.get('name', 'Unnamed')
+                priority = f.get('priority', 'P1')
+                desc = f.get('description', '')
+                flow_lines.append(f"- [{priority}] {name}{': ' + desc if desc else ''}")
+            flows_section = f"""\nCRITICAL USER FLOWS (prioritized — focus testing effort here):
+{chr(10).join(flow_lines)}
+"""
+        
+        domain_section = ""
+        if domain_rules:
+            domain_section = f"""\nDOMAIN RULES & CONSTRAINTS:
+{domain_rules}
+"""
+        
+        preferred_types = getattr(project, 'preferred_test_types', []) or []
+        preferred_section = ""
+        if preferred_types:
+            preferred_section = f"""\nPROJECT PREFERRED TEST TYPES (selected during project setup):
+{', '.join(preferred_types)}
+These are the testing priorities the user chose. Align your MISSION SCENARIOS with these preferences.
+"""
 
         return f"""
 You are an Universal Autonomous QA Agent. You have the "Vibe" of a senior human tester.
@@ -815,10 +1260,10 @@ MISSION PROFILE:
 - CATEGORIES: {", ".join(self.categories)}
 - TARGET LAYER: {self.layer}
 - MISSION SCENARIOS: {self.scenarios} (Focus your thinking on these types of tests)
-
+{auth_section}{preferred_section}{tech_section}{flows_section}{domain_section}
 TARGET ENVIRONMENT:
 - BASE URL: {self.collection.base_url or "None provided"}
-- PROJECT VARS: {json.dumps(self.env_vars)}
+- PROJECT VARS: {json.dumps(self.redact_env_vars(self.env_vars))}
 
 GLOBAL TEST CREDENTIALS (Use these if you encounter external/3rd-party auth screens): 
 {json.dumps(creds, indent=2)}
@@ -836,35 +1281,26 @@ YOUR TOOLSET:
    - Use 'create' to get a new address.
    - Use 'get_messages' to check the inbox and find OTP codes.
 
+SCENARIO-SPECIFIC DIRECTIVES:
+{self._build_scenario_directives()}
+
+{self._build_regression_context()}
 INSTRUCTIONS:
 1. EXPLORATION DEPTH & PIVOT: Your core goal is to verify ALL MISSION SCENARIOS: {self.scenarios}.
-   - BE THOROUGH: For scenarios like SECURITY, EDGE_CASE, and VALIDATION_ERROR, do not just try one thing and move on. Attempt at least 2-3 different variations for each scenario on high-impact endpoints.
-     * For SECURITY: Try Broken Auth (no token), Malformed Token, and parameter manipulation (IDOR).
-     * For EDGE_CASE: Try boundary values (empty, max length, negative numbers, emoji).
-     * For VALIDATION: Try missing fields vs malformed fields.
-   - PIVOTING: Once a feature has been "stressed" with these variations, pivot to the next scenario or endpoint.
-   - CRITICAL: You are NOT ALLOWED to call 'FINISH' until you have actually performed multiple tangiable actions for each mission scenario.
-    - AUTHENTICATION STRATEGY: 
-      1. FOR 3RD-PARTY AUTH (Google/GitHub/Social): Use the `GLOBAL TEST CREDENTIALS` provided. Click the social login button and type the corresponding email/password into the external screens.
-      2. FOR STANDARD EMAIL SIGNUP/LOGIN: Use the `MAIL_ACTION` tool. 
-         - Use 'create' to get a `AGENT_EMAIL` before starting the signup.
-         - Use the `MAIL_ACTION` 'get_messages' to retrieve OTPs or verification links from your inbox.
-      3. Do NOT use `MAIL_ACTION` for Google/GitHub flows unless specifically instructed.
-   - OTP/VERIFICATION FLOW: If you initiate an action that sends an email (like signup or password reset), follow these steps:
-     1. Use MAIL_ACTION 'create' BEFORE the signup to get a real address.
-     2. Use the 'AGENT_EMAIL' variable from your memory in the API/Frontend signup.
-     3. Use MAIL_ACTION 'get_messages' to retrieve the OTP.
-     4. Proceed with the verification using the 'extracted_otp'.
-2. COMPLIANCE CHECKLIST: Before every move, mentally check off which scenarios from {self.scenarios} you have already verified. Do not finish until you have diverse coverage for all of them.
-3. SCHEMA OBSESSION: Before calling any API, check its 'request_body' field in the AVAILABLE API ENDPOINTS list. This is your MANDATORY template. Match its keys and casing EXACTLY.
-3. STRATEGIZE: If SECURITY is a scenario, look for broken auth or injection points. If EDGE_CASE, try weird values.
-4. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY for the correct keys. 
-   - If the server says "FirstName is required", look at your casing! (e.g. maybe it wants 'FirstName' instead of 'firstName').
-   - Use the exact keys the server's error message suggests.
+   - BE THOROUGH: Do not just try one thing and move on. Attempt at least 2-3 different variations per scenario on high-impact endpoints.
+   - PIVOTING: Once a feature has been "stressed" with variations, pivot to the next scenario or endpoint.
+   - CRITICAL: You are NOT ALLOWED to call 'FINISH' until you have actually performed multiple tangible actions for each mission scenario.
+2. AUTHENTICATION STRATEGY:
+   - FOR 3RD-PARTY AUTH (Google/GitHub/Social): Use the `GLOBAL TEST CREDENTIALS` provided. Click the social login button and type the corresponding email/password.
+   - FOR STANDARD EMAIL SIGNUP/LOGIN: Use `MAIL_ACTION` tool. Use 'create' to get a `AGENT_EMAIL` before signup. Use 'get_messages' to retrieve OTPs.
+   - For OTP/VERIFICATION FLOW: MAIL_ACTION 'create' BEFORE signup → use 'AGENT_EMAIL' in signup → MAIL_ACTION 'get_messages' to get OTP → verify.
+3. COMPLIANCE CHECKLIST: Before every move, mentally check off which scenarios from {self.scenarios} you have already verified. Do not finish until you have diverse coverage for ALL of them.
+4. SCHEMA OBSESSION: Before calling any API, check its 'request_body' field in the AVAILABLE API ENDPOINTS list. This is your MANDATORY template. Match its keys and casing EXACTLY. Also check 'auth_type' and 'headers' per endpoint.
+5. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY for the correct keys. If the server says "FirstName is required", look at your casing! Use the exact keys the server's error message suggests.
 {"6. UI EXPLORATION: If 'AVAILABLE API ENDPOINTS' is empty but you have a 'BASE URL', start by using BROWSER_ACTION 'navigate' to the BASE URL to discover the application." if has_browser else ""}
-4. SAFE MODE GUARDRAILS: {"ENABLED" if self.is_safe_mode else "DISABLED"}
+7. SAFE MODE GUARDRAILS: {"ENABLED" if self.is_safe_mode else "DISABLED"}
    - {"Since Safe Mode is ENABLED: You are strictly forbidden from performing destructive actions (DELETE, PUT/PATCH that updates sensitive data) on PRODUCTION URLs. Only perform READ operations or safe creations." if self.is_safe_mode else "Since Safe Mode is DISABLED: You may perform destructive actions to test exploitation, but only if necessary to verify the scenario."}
-5. MISSION COMPLETE: You successfully finish when the intent of the User Story is verified. 
+8. MISSION COMPLETE: You successfully finish when the intent of the User Story is verified.
    - This usually means 2xx success, but if the story is a "Negative Test" (e.g., "Verify that unauthenticated users get blocked"), then a 403/401 is actually your goal!
    - Explain your result clearly in the FINISH reason.
 
@@ -929,37 +1365,12 @@ Type F: FINISH
             # We don't want to bloat the history, so we just temporarily insert/update the memory
             messages = [self.history[0]] + [memory_context] + self.history[1:]
 
-            if self.provider == "gemini":
-                # ... (Gemini Logic) ...
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.gemini_api_key}"
-                contents = []
-                for msg in messages:
-                    role = "user" if msg["role"] in ["user", "system"] else "model"
-                    contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-                
-                payload = {
-                    "contents": contents,
-                    "generationConfig": {
-                        "response_mime_type": "application/json",
-                        "temperature": 0.2
-                    }
-                }
-                resp = requests.post(url, json=payload, timeout=90)
-                resp.raise_for_status()
-                content = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-            else:
-                # ... (OpenAI Logic) ...
-                url = "https://api.openai.com/v1/chat/completions"
-                payload = {
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": 0.2,
-                    "response_format": {"type": "json_object"}
-                }
-                headers = {"Authorization": f"Bearer {self.openai_api_key}", "Content-Type": "application/json"}
-                resp = requests.post(url, json=payload, headers=headers, timeout=30)
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
+            response = litellm.completion(
+                model=self.model,
+                messages=messages,
+                response_format={"type": "json_object"}
+            )
+            content = response.choices[0].message.content
             
             # Append assistant's thought to history
             self.history.append({"role": "assistant", "content": content})
@@ -982,7 +1393,19 @@ Type F: FINISH
                 
         except Exception as e:
             logger.error(f"Agent Brain Failure: {e}")
-            return {"type": "FINISH", "reason": f"Agent crashed: {e}"}
+            # Sanitize error for user display
+            err_str = str(e)
+            if '404' in err_str and 'Not Found' in err_str:
+                reason = 'The AI model returned an error (404). The model may not be available for your API key.'
+            elif '429' in err_str:
+                reason = 'Rate limited by the AI service. Please wait and try again.'
+            elif '503' in err_str:
+                reason = 'The AI service is temporarily unavailable. Please try again shortly.'
+            elif 'timeout' in err_str.lower() or 'timed out' in err_str.lower():
+                reason = 'The AI service timed out. The request may have been too complex.'
+            else:
+                reason = f'Agent encountered an error: {err_str[:200]}'
+            return {"type": "FINISH", "reason": reason}
 
     def _record_observation(self, text):
         """Feeds the result of an action back into the brain."""
