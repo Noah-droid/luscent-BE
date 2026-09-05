@@ -20,4 +20,6 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
+# Deployment host (EC2) has ~1GB RAM: 3 workers gets OOM-killed, so default to 2
+# with a generous timeout for LLM-backed requests.
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "120"]
