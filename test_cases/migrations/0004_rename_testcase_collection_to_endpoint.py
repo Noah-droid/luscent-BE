@@ -4,7 +4,7 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('collection', '0003_rename_collection_to_endpoint'),
+        ('collection', '0010_alter_collection_id'),
         ('test_cases', '0003_testrun_batch_id_testrun_triggered_by'),
     ]
 
@@ -17,6 +17,6 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='testcase',
             name='endpoint',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='test_cases', to='collection.endpoint'),
+            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='test_cases', to='collection.endpoint', db_column='endpoint_id'),
         ),
     ]
