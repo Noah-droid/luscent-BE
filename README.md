@@ -102,5 +102,5 @@ To enable session persistence (keeping the sandbox alive between tests):
 
 3. **Start Celery (for async tests):**
    ```bash
-   celery -A config worker --loglevel=info
+ celery -A config worker --pool=solo -l info --beat
    ```
