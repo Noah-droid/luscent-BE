@@ -133,6 +133,10 @@ class ImportJob(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    # Resolved base_url captured at queue time for URL imports so the worker and
+    # any UI polling don't have to re-derive it from the spec (which may carry a
+    # stale localhost host or point at a file-only path).
+    base_url = models.CharField(max_length=500, blank=True, null=True)
 
     class Meta:
         ordering = ["-created_at"]
