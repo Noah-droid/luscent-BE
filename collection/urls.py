@@ -6,7 +6,8 @@ from .views import (
     EndpointDetailView,
     ImportJobListView,
     SwaggerImportView,
-    CrawlerImportView
+    CrawlerImportView,
+    CancelImportJobView,
 )
 
 urlpatterns = [
@@ -24,4 +25,5 @@ urlpatterns = [
     # Bulk Imports
     path("<uuid:collection_id>/import-swagger/", SwaggerImportView.as_view(), name="swagger-import"),
     path("<uuid:collection_id>/import-crawler/", CrawlerImportView.as_view(), name="crawler-import"),
+    path("import-jobs/<uuid:job_id>/cancel/", CancelImportJobView.as_view(), name="cancel-import"),
 ]
