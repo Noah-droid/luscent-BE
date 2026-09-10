@@ -154,8 +154,11 @@ DATABASES = {
 }
 
 # SSL Configuration
-if config('DB_SSL_REQUIRE', default=True, cast=bool):
-    DATABASES['default']['OPTIONS'] = {'sslmode': 'require'}
+ssl_require = config('DB_SSL_REQUIRE', default=True, cast=bool)
+DATABASES['default']['OPTIONS'] = {
+    'sslmode': 'require' if ssl_require else 'disable',
+    'channel_binding': 'disable',  # Required for local PostgreSQL with trust auth
+}
 
 
 
