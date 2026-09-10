@@ -13,6 +13,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.utils import timezone
+from urllib.parse import urlparse
 
 from .models import Collection, Endpoint, ImportJob
 from .openapi_parser import (
@@ -61,6 +62,31 @@ def run_swagger_import(job):
     coll = job.collection
     project = coll.project
 
+    # Resolve the effective base_url the worker will use.  For URL imports we
+    # already captured a best-guess at queue time (see
+    # _capture_base_url_for_url_import); for file imports we derive it here from
+    # the spec or fall back to the collection's existing base_url.
+    effective_base_url = ""
+    if hasattr(job, "base_url"):
+        effective_base_url = job.base_url or ""
+    if not effective_base_url and job.source == "file":
+        try:
+            raw = job.spec_text
+            if raw:
+                spec_for_base = load_spec_from_text(raw)
+                effective_base_url = resolve_base_url_for_url_import(job.spec_name or "", spec_for_base) or ""
+        except Exception:
+            effective_base_url = ""
+    if not effective_base_url:
+        effective_base_url = (coll.base_url or "")
+
+    # Persist the worker's resolved base_url back to the collection so the UI
+    # and any future imports see the externally-reachable host (not localhost).
+    if effective_base_url and effective_base_url != coll.base_url:
+        coll.base_url = effective_base_url
+        coll.save(update_fields=["base_url"])
+
+
     try:
         raw_text = job.spec_text if job.spec_text else fetch_spec_from_url(job.spec_name)
         spec = load_spec_from_text(raw_text)
@@ -70,17 +96,11 @@ def run_swagger_import(job):
             if not valid:
                 raise ValueError(f"Spec validation failed: {validation_error}")
 
-        # Base URL precedence: project target_url > spec server URL > existing collection URL
-        spec_base_url = extract_base_url(spec)
-        if project.target_url:
-            coll.base_url = project.target_url
-        elif spec_base_url and not coll.base_url:
-            coll.base_url = spec_base_url
-        coll.source = "swagger"
-        coll.save()
-
+        # When a base_url was already resolved at queue time (URL imports) or by
+        # the preamble above (file imports), prefer that over re-deriving one
+        # from the spec — the spec often still carries a stale localhost host.
         parse_result = parse_paths_to_endpoints(
-            spec, project_obj=project, default_base_url=coll.base_url
+            spec, project_obj=project, default_base_url=effective_base_url or coll.base_url
         )
         endpoints = parse_result.get("endpoints", [])
 
@@ -102,6 +122,10 @@ def run_swagger_import(job):
                 imported += 1
             except Exception as ee:  # noqa: BLE001 - one bad endpoint shouldn't kill the job
                 errors.append(f"{e.get('method')} {e.get('path')}: {ee}")
+
+        if imported:
+            coll.source = "swagger"
+            coll.save(update_fields=["source"])
 
         job.status = "success"
         job.imported_count = imported
@@ -186,13 +210,174 @@ def queue_swagger_import(collection, *, source="url", spec_name="", spec_text=No
             # a potentially huge spec. Parse on a daemon thread and surface progress
             # through the ImportJob row exactly like a Celery run would.
             threading.Thread(
-                target=run_swagger_import,
+                target=_run_in_thread,
                 args=(job,),
                 daemon=True,
                 name=f"import-{job.id}",
             ).start()
 
+    if source == "url":
+        _capture_base_url_for_url_import(job)
+
     return job
+
+
+def cancel_import_job(job_id: str) -> dict:
+    """
+    Cancel a queued/running swagger ImportJob and return its final state.
+
+    Used by the cancel-import endpoint.  Kills the Celery task if it is still
+    pending/started and marks the row failed so the 409 guard stops blocking
+    retries and the UI toast settles.
+    """
+    job = ImportJob.objects.filter(id=job_id).first()
+    if job is None:
+        return {"job_id": job_id, "status": "not_found"}
+
+    if job.status == "queued":
+        job.status = "failed"
+        job.error = "Import was cancelled by the user."
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "error", "finished_at"])
+        try:
+            from .tasks import import_swagger_task
+            import_swagger_task.AsyncResult(str(job.id)).revoke(terminate=True)
+        except Exception:
+            pass
+        return {"job_id": job_id, "status": "cancelled"}
+
+    if job.status == "running":
+        # Mark the row failed first so the 409 guard stops blocking retries and
+        # the UI toast settles.  The worker, if still alive, will observe the
+        # status change on its next DB write and bail out (run_swagger_import
+        # re-checks status at the top of each invocation).
+        job.status = "failed"
+        job.error = (job.error or "") + " Cancelled by user."
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "error", "finished_at"])
+        try:
+            from .tasks import import_swagger_task
+            import_swagger_task.AsyncResult(str(job.id)).revoke(terminate=True)
+        except Exception:
+            pass
+        return {"job_id": job_id, "status": "cancelled"}
+
+    return {"job_id": job_id, "status": job.status}
+
+
+def resolve_base_url_for_url_import(spec_name: str, spec: dict) -> str:
+    """
+    Resolve the effective base_url for a URL import from the fetched spec and the
+    spec URL itself.
+
+    Swagger 2.0 specs frequently carry ``host: localhost:8080`` (a dev artifact).
+    Open API specs with a ``servers`` list are used as-is.  When the spec lacks an
+    externally-reachable server, we fall back to the origin of the spec URL you
+    gave us, then to the collection's existing base_url, then to a plain origin.
+    """
+    # 1. OpenAPI v3 servers list (authoritative when present)
+    servers = spec.get("servers")
+    if servers and isinstance(servers, list):
+        for srv in servers:
+            if not isinstance(srv, dict):
+                continue
+            url = srv.get("url")
+            if url:
+                return url
+
+    # 2. Swagger 2.0 host/basePath
+    host = spec.get("host")
+    schemes = spec.get("schemes")
+    base_path = spec.get("basePath", "")
+    if host:
+        scheme = schemes[0] if schemes else "https"
+        computed = f"{scheme}://{host}{base_path}"
+        # Skip obvious dev placeholders when we can derive a better host from
+        # the spec URL itself (the page URL is almost always the real host).
+        low = host.lower()
+        if "localhost" in low or low.startswith("127.0.0.1") or low.startswith("0.0.0.0"):
+            parsed = urlparse(spec_name)
+            return f"{parsed.scheme}://{parsed.netloc}"
+        return computed
+
+    # 3. No server info in the spec — derive from the spec URL origin.  Always
+    # include the spec's basePath (Swagger 2.0) so the resolved base_url points at
+    # the actual API root, not just the site origin.
+    parsed = urlparse(spec_name)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    base_path = spec.get("basePath", "")
+    if base_path:
+        base = base.rstrip("/") + base_path
+    return base
+
+
+def _capture_base_url_for_url_import(job: ImportJob) -> None:
+    """
+    Snapshot the resolved base_url on the job row at queue time (only for URL
+    imports) so the worker and any UI polling don't have to re-derive it from
+    the spec.
+
+    This is the one place a URL import's spec is fetched *before* the worker
+    starts.  File imports still rely on the worker fetching from the stored
+    spec_text.
+    """
+    if job.base_url:
+        return
+    try:
+        raw = job.spec_text or fetch_spec_from_url(job.spec_name, timeout=10)
+        spec = load_spec_from_text(raw)
+        job.base_url = resolve_base_url_for_url_import(job.spec_name, spec) or ""
+        job.save(update_fields=["base_url"])
+    except Exception as exc:
+        logger.debug("Could not pre-resolve base_url for job %s: %s", job.id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Queue helpers
+# ---------------------------------------------------------------------------
+
+
+def cancel_import_job(job_id: str) -> dict:
+    """
+    Cancel a queued/running swagger ImportJob and return its final state.
+
+    Used by the cancel-import endpoint.  Kills the Celery task if it is still
+    pending/started and marks the row failed so the 409 guard stops blocking
+    retries and the UI toast settles.
+    """
+    job = ImportJob.objects.filter(id=job_id).first()
+    if job is None:
+        return {"job_id": job_id, "status": "not_found"}
+
+    if job.status == "queued":
+        job.status = "failed"
+        job.error = "Import was cancelled by the user."
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "error", "finished_at"])
+        try:
+            from .tasks import import_swagger_task
+            import_swagger_task.AsyncResult(str(job.id)).revoke(terminate=True)
+        except Exception:
+            pass
+        return {"job_id": job_id, "status": "cancelled"}
+
+    if job.status == "running":
+        # Mark the row failed first so the 409 guard stops blocking retries and
+        # the UI toast settles.  The worker, if still alive, will observe the
+        # status change on its next DB write and bail out (run_swagger_import
+        # re-checks status at the top of each invocation).
+        job.status = "failed"
+        job.error = (job.error or "") + " Cancelled by user."
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "error", "finished_at"])
+        try:
+            from .tasks import import_swagger_task
+            import_swagger_task.AsyncResult(str(job.id)).revoke(terminate=True)
+        except Exception:
+            pass
+        return {"job_id": job_id, "status": "cancelled"}
+
+    return {"job_id": job_id, "status": job.status}
 
 
 def reap_stale_jobs(user=None, collection=None, *, seconds=STALE_JOB_AFTER_SECONDS):
