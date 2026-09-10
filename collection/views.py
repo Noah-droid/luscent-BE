@@ -279,6 +279,30 @@ class SwaggerImportView(APIView):
         )
 
 
+class CancelImportJobView(APIView):
+    """
+    Cancel a queued/running import job.  Accepts ``job_id`` either in the URL
+    (cancel-import/<job_id>/) or in the POST body (``{"job_id": "..."}``).
+    Returns the job's final state.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, job_id):
+        from .importer import cancel_import_job
+
+        job_id = (request.data.get("job_id") or job_id or "").strip()
+        if not job_id:
+            return Response({"error": "job_id is required."}, status=400)
+
+        result = cancel_import_job(job_id)
+        status_code = {
+            "not_found": status.HTTP_404_NOT_FOUND,
+            "cancelled": status.HTTP_200_OK,
+            "cancelling": status.HTTP_202_ACCEPTED,
+        }.get(result["status"], status.HTTP_200_OK)
+        return Response(result, status=status_code)
+
+
 class CrawlerImportView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
