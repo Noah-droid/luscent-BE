@@ -225,16 +225,20 @@ Follow the standard TestCase schema:
 
     def _call_llm(self, prompt):
         """Unified LLM call via litellm — handles retries, model routing, and provider fallback automatically."""
-        response = litellm.completion(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": "You are a professional QA Orchestrator. Output ONLY valid JSON. Be precise and deterministic in your responses."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=self.max_tokens,
-            response_format={"type": "json_object"}
-        )
-        return response.choices[0].message.content
+        try:
+            response = litellm.completion(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a professional QA Orchestrator. Output ONLY valid JSON. Be precise and deterministic in your responses."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=self.max_tokens,
+                response_format={"type": "json_object"}
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"LLM call failed: {type(e).__name__}")
+            raise
 
     def _parse_response(self, response):
         """Cleans AI wrapping and parses JSON."""

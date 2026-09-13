@@ -1801,18 +1801,23 @@ Type G: FINISH
                 
         except Exception as e:
             logger.error(f"Agent Brain Failure: {e}")
-            # Sanitize error for user display
-            err_str = str(e)
-            if '404' in err_str and 'Not Found' in err_str:
+            err_str = str(e).lower()
+            if '404' in err_str and 'not found' in err_str:
                 reason = 'The AI model returned an error (404). The model may not be available for your API key.'
             elif '429' in err_str:
                 reason = 'Rate limited by the AI service. Please wait and try again.'
             elif '503' in err_str:
                 reason = 'The AI service is temporarily unavailable. Please try again shortly.'
-            elif 'timeout' in err_str.lower() or 'timed out' in err_str.lower():
+            elif '403' in err_str:
+                reason = 'Access denied by the AI service. Please check your API key configuration.'
+            elif 'api key' in err_str or 'apikey' in err_str or 'auth' in err_str or 'permission' in err_str:
+                reason = 'Authentication error with the AI service. Please check your API key configuration.'
+            elif 'timeout' in err_str or 'timed out' in err_str:
                 reason = 'The AI service timed out. The request may have been too complex.'
+            elif 'invalid' in err_str and 'model' in err_str:
+                reason = 'The configured AI model is invalid. Please check your model settings.'
             else:
-                reason = f'Agent encountered an error: {err_str[:200]}'
+                reason = 'An unexpected error occurred with the AI service. Please try again.'
             return {"type": "FINISH", "reason": reason}
 
     def _record_observation(self, text):

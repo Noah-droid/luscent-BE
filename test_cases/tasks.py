@@ -299,15 +299,21 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
             from django.utils import timezone as tz
             mission.status = "error"
             mission.completed_at = tz.now()
-            err_str = str(e)
-            if '404' in err_str and 'Not Found' in err_str:
+            err_str = str(e).lower()
+            if '404' in err_str and 'not found' in err_str:
                 mission.error_message = "The AI model returned an error (404). Check that your API key has access to the configured model."
             elif '429' in err_str:
                 mission.error_message = "Rate limited by the AI service. Please wait and try again."
             elif '503' in err_str:
                 mission.error_message = "The AI service is temporarily unavailable. Please try again shortly."
+            elif '403' in err_str:
+                mission.error_message = "Access denied by the AI service. Please check your API key configuration."
+            elif 'api key' in err_str or 'apikey' in err_str or 'auth' in err_str or 'permission' in err_str:
+                mission.error_message = "Authentication error with the AI service. Please check your API key configuration."
+            elif 'timeout' in err_str or 'timed out' in err_str:
+                mission.error_message = "The AI service timed out. The request may have been too complex."
             else:
-                mission.error_message = f"Mission failed: {err_str[:200]}"
+                mission.error_message = "An unexpected error occurred with the AI service. Please try again."
             mission.save()
             
             # Create a failure record in TestRun for visibility
@@ -556,17 +562,21 @@ def run_autonomous_mission_task(mission_id, user_id):
         logger.error(f"Mission {mission_id} failed: {e}")
         mission.status = "error"
         mission.completed_at = tz.now()
-        mission.error_message = str(e)[:200]
-        mission.save()
-        err_str = str(e)
-        if '404' in err_str and 'Not Found' in err_str:
+        err_str = str(e).lower()
+        if '404' in err_str and 'not found' in err_str:
             mission.error_message = "The AI model returned an error (404). Check that your API key has access to the configured model."
         elif '429' in err_str:
             mission.error_message = "Rate limited by the AI service. Please wait and try again."
         elif '503' in err_str:
             mission.error_message = "The AI service is temporarily unavailable. Please try again shortly."
+        elif '403' in err_str:
+            mission.error_message = "Access denied by the AI service. Please check your API key configuration."
+        elif 'api key' in err_str or 'apikey' in err_str or 'auth' in err_str or 'permission' in err_str:
+            mission.error_message = "Authentication error with the AI service. Please check your API key configuration."
+        elif 'timeout' in err_str or 'timed out' in err_str:
+            mission.error_message = "The AI service timed out. The request may have been too complex."
         else:
-            mission.error_message = f"Mission failed: {err_str[:200]}"
+            mission.error_message = "An unexpected error occurred with the AI service. Please try again."
         mission.save()
 
         # Create a failure record in TestRun for visibility
