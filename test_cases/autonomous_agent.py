@@ -7,6 +7,7 @@ import requests
 from django.conf import settings
 import litellm
 from .models import AgentMission, AgentMissionStep, AgentPrompt
+from .browser_observation import format_observation_for_llm, log_observation_metrics
 
 try:
     from e2b import Sandbox
@@ -30,6 +31,10 @@ class AutonomousAgent:
         self.env_vars = env_vars or {}
         self.browser_process = None # Persistent browser process for live view
         self.previous_failures = [] # Populated for regression missions
+
+        # Observation V2: structured Playwright perception instead of the
+        # screenshot → vision-LLM heartbeat. Legacy path stays behind the flag.
+        self.perception_v2 = getattr(settings, 'PERCEPTION_V2', True)
         
         # Mission Context (Determines the agent's focus)
         self.scenarios = scenarios or "HAPPY_PATH"
@@ -77,6 +82,7 @@ class AutonomousAgent:
         self.browser_config = {} # Initialized from mission context
         self.mail_session = None # Mail.tm session
         self.current_email = None
+        self.seen_mail_ids = set() # Mail.tm message IDs already reported to the LLM
         
         if self.env_vars:
             self.extracted_vars.update(self.env_vars)
@@ -242,14 +248,35 @@ class AutonomousAgent:
                     # RELOAD mission status to detect pause/resume from UI
                     mission.refresh_from_db()
                     
-                    # If paused by human takeover, spin-wait until resumed
+                    # If paused by human takeover, spin-wait until resumed.
+                    # Auto-pauses (CAPTCHA escalation) release automatically
+                    # after a generous window so queued missions can't wedge.
                     while mission.status == 'paused':
+                        if (getattr(self, '_auto_pause_active', False)
+                                and time.time() - getattr(self, '_auto_pause_started_at', time.time()) > 600):
+                            logger.warning("[Agent] Human-help window expired (10 min) — auto-resuming mission")
+                            self._auto_pause_active = False
+                            mission.status = 'running'
+                            mission.save(update_fields=['status'])
+                            try:
+                                AgentPrompt.objects.create(
+                                    mission=mission,
+                                    prompt=("[SYSTEM] No human responded to the CAPTCHA escalation within "
+                                            "10 minutes. Continue the mission: retry 'solve_captcha' once, "
+                                            "then skip this blocker and note it in your final report."),
+                                    is_processed=False,
+                                )
+                            except Exception:
+                                pass
                         logger.info(f"[Agent] Mission paused — waiting for human takeover to resume...")
                         time.sleep(5)
                         mission.refresh_from_db()
                         if mission.status == 'error':
                             logger.info("[Agent] Mission was killed while paused.")
-                            return steps_log                    # Check for new prompts (including takeover signals)
+                            return steps_log
+                    # Loop exited (human resumed or timeout) — re-arm escalation
+                    self._auto_pause_active = False
+                    self._captcha_escalated = False                    # Check for new prompts (including takeover signals)
                     new_prompts = AgentPrompt.objects.filter(mission=mission, is_processed=False).order_by('created_at')
                     for p in new_prompts:
                         logger.info(f"[Agent] Received User Guidance: {p.prompt}")
@@ -387,7 +414,15 @@ class AutonomousAgent:
                         logger.error(f"Failed to save mission step: {err}")
 
                 # Feedback loop
-                self._record_observation(f"Result for {action_type}: {json.dumps(result)}")
+                # Observation V2: browser results carry a bounded structured
+                # observation — format it for reasoning instead of dumping JSON.
+                if action_type == "BROWSER_ACTION" and isinstance(result, dict) and result.get("observation"):
+                    feedback = format_observation_for_llm(result["observation"])
+                    if result.get("error"):
+                        feedback = f"ACTION FAILED: {result['error']}\n\n{feedback}"
+                else:
+                    feedback = f"Result for {action_type}: {json.dumps(result)}"
+                self._record_observation(feedback)
 
         except Exception as e:
             logger.error(f"[Agent] Mission Crashed: {e}")
@@ -720,8 +755,30 @@ cat /tmp/gui_setup.log >> /tmp/gui_setup_full.log
             _script = _f.read()
         headless_str = str(is_headless)  # Must be True/False (Python bool), not true/false
         display_line = 'os.environ["DISPLAY"] = ":1"' if not is_headless else '# Headless mode — no DISPLAY needed'
-        script = _script.replace('__HEADLESS__', headless_str).replace('__DISPLAY_LINE__', display_line)
+        perception_str = str(bool(self.perception_v2))
+        script = (_script
+                  .replace('__HEADLESS__', headless_str)
+                  .replace('__DISPLAY_LINE__', display_line)
+                  .replace('__PERCEPTION_V2__', perception_str))
         try:
+            # Observation V2 needs browser_observation.py alongside the manager.
+            if self.perception_v2:
+                _obs_src = os.path.join(os.path.dirname(__file__), 'browser_observation.py')
+                with open(_obs_src, 'r') as _of:
+                    _obs_code = _of.read()
+                if not self._sandbox_file_write("/home/user/browser_observation.py", _obs_code):
+                    # Manager can still run: template degrades to legacy perception.
+                    logger.warning("[Agent] Could not upload browser_observation.py — manager will fall back to legacy perception")
+            # CAPTCHA solver: upload alongside the manager (missing module →
+            # 'solve_captcha' reports unavailable instead of crashing).
+            try:
+                _cap_src = os.path.join(os.path.dirname(__file__), 'browser_captcha_solver.py')
+                with open(_cap_src, 'r') as _cf:
+                    _cap_code = _cf.read()
+                if not self._sandbox_file_write("/home/user/browser_captcha_solver.py", _cap_code):
+                    logger.warning("[Agent] Could not upload browser_captcha_solver.py — CAPTCHA solving disabled for this mission")
+            except Exception as _e:  # noqa: BLE001
+                logger.warning(f"[Agent] CAPTCHA solver upload skipped: {_e}")
             if not self._sandbox_file_write("/home/user/browser_manager.py", script):
                 logger.error("[Agent] Failed to write browser manager script — sandbox may be unhealthy")
                 return
@@ -796,6 +853,25 @@ cat /tmp/gui_setup.log >> /tmp/gui_setup_full.log
                 "selector": action.get("selector"),
                 "value": action.get("value")
             }
+            # Observation V2 opt-ins (ignored by the legacy manager)
+            for _k in ("capture_screenshot", "analyze_visual"):
+                if action.get(_k):
+                    curr_action[_k] = True
+            # Semantic element identity (optional, preferred over the selector
+            # hint). resolve_target() in the sandbox matches role+name against
+            # the LIVE page at action time; the selector is only a fallback.
+            for _k in ("target_role", "target_name"):
+                if action.get(_k):
+                    curr_action[_k] = action[_k]
+            # Mission-level evidence policy: 'capture_on_failure' opts into
+            # failure screenshots; default (None) keeps failures screenshot-free.
+            _policy = (self.browser_config or {}).get("evidence_policy")
+            if _policy:
+                curr_action["evidence_policy"] = _policy
+            # CAPTCHA solving parameters (solve_captcha action + navigate opt-out)
+            for _k in ("diagnose", "captcha_type", "max_wait_s", "auto_solve_captcha"):
+                if _k in action and action[_k] is not None:
+                    curr_action[_k] = action[_k]
             # Send action as JSON line via sandbox.commands.send_stdin
             self.sandbox.commands.send_stdin(self.browser_process.pid, json.dumps(curr_action) + "\n")
             
@@ -804,13 +880,24 @@ cat /tmp/gui_setup.log >> /tmp/gui_setup_full.log
                 if out and out.strip():
                     try:
                         res = json.loads(out)
-                        # Post-process: Vision
-                        if res.get("screenshot_b64"):
-                            res["visual_observation"] = self._analyze_vision(res["screenshot_b64"])
-                            del res["screenshot_b64"]
-                        return res
                     except json.JSONDecodeError:
                         continue # Skip non-json lines
+                    # Track last known page URL so a headful relaunch during
+                    # CAPTCHA escalation can restore the challenge screen.
+                    if isinstance(res, dict) and res.get("url"):
+                        self._last_browser_url = res["url"]
+                    # CAPTCHA escalation: solver hit an interactive challenge it
+                    # cannot solve (image grid etc.) — hand it to the human via
+                    # the existing pause/takeover channel. Once per challenge,
+                    # re-armed after a human resume.
+                    cap = res.get("captcha_report") if isinstance(res, dict) else None
+                    if cap and cap.get("needs_human") and not getattr(self, "_captcha_escalated", False):
+                        self._captcha_escalated = True
+                        try:
+                            self._request_human_for_captcha(cap)
+                        except Exception as esc_err:  # noqa: BLE001 — never lose the action result
+                            logger.warning(f"[Agent] CAPTCHA escalation failed: {esc_err}")
+                    return self._finalize_browser_result(res, action)
         except Exception as e:
             logger.error(f"[Agent] Error in persistent browser action: {e}")
             return {"error": str(e)}
@@ -900,10 +987,215 @@ def run():
 run()
 """
         res = self._run_in_sandbox_or_host(script)
-        if res.get("screenshot_b64"):
-            res["visual_observation"] = self._analyze_vision(res["screenshot_b64"])
-            del res["screenshot_b64"]
+        return self._finalize_browser_result(res, action)
+
+    def _finalize_browser_result(self, res, action=None):
+        """Shared post-processing for persistent + legacy browser results.
+
+        Legacy path (perception_v2=False): screenshot arrives on every action —
+        run vision on it and strip the b64 (historical behavior, unchanged).
+
+        Observation V2 path: NO automatic vision. The screenshot (present only
+        for explicit requests / failure evidence) is persisted to Cloudinary
+        via the existing storage mechanism and attached to the step result as
+        screenshot_url. Structured observation stays in res["observation"].
+        """
+        if not isinstance(res, dict):
+            return res
+
+        screenshot_b64 = res.pop("screenshot_b64", None)
+
+        if not self.perception_v2:
+            # Legacy heartbeat: always analyze, discard the image (old behavior).
+            if screenshot_b64:
+                res["visual_observation"] = self._analyze_vision(screenshot_b64)
+            return res
+
+        # ---------------- Observation V2 ----------------
+        obs = res.get("observation") or {}
+        action_type = (action or {}).get("action")
+        wants_vision = bool((action or {}).get("analyze_visual"))
+        if wants_vision and screenshot_b64:
+            # Vision is an explicit, policy-driven fallback — never a heartbeat.
+            try:
+                obs["visual"] = {
+                    "screenshot_b64": screenshot_b64,
+                    "captured": True,
+                    "analyzed": True,
+                    "description": self._analyze_vision(screenshot_b64),
+                }
+                obs["strategy"] = (obs.get("strategy") or "semantic") + "+visual"
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[Agent] Vision analysis failed: %s", e)
+            finally:
+                screenshot_b64 = None  # analyzed; don't also persist
+
+        if screenshot_b64:
+            url = self._persist_screenshot_evidence(
+                screenshot_b64,
+                reason=obs.get("screenshot_reason") or ("failure" if res.get("error") else "explicit_request"),
+            )
+            if url:
+                res["screenshot_url"] = url
+                if obs.get("visual"):
+                    obs["visual"]["evidence_url"] = url
+                    obs["visual"].pop("screenshot_b64", None)  # keep observation small
+        elif obs.get("visual"):
+            # Never pretend visual evidence exists when it doesn't.
+            obs["visual"].pop("screenshot_b64", None)
+
+        res["observation"] = obs
+        if obs.get("strategy") and "observation_strategy" not in res:
+            res["observation_strategy"] = obs["strategy"]
+
+        log_observation_metrics(obs, logger, prefix="[Agent]")
         return res
+
+    def _persist_screenshot_evidence(self, screenshot_b64, reason="explicit_request"):
+        """Persist an intentionally captured screenshot as evidence.
+
+        Uses the existing Cloudinary storage mechanism (same one TestRun uses)
+        so evidence lands in the same place reports already read from.
+        Returns the evidence URL, or None when nothing was uploaded — we never
+        fake visual evidence.
+        """
+        if not screenshot_b64:
+            return None
+        try:
+            import base64 as _b64
+            import tempfile as _tempfile
+            from .storage import CloudinaryStorage
+
+            mission = getattr(self, "_current_mission", None)
+            project = mission.collection.project if mission else self.collection.project
+            ref = str(mission.id) if mission else "adhoc"
+            tmp = _tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            try:
+                tmp.write(_b64.b64decode(screenshot_b64))
+                tmp.close()
+                storage = CloudinaryStorage()
+                upload = storage.upload_screenshot(
+                    file_path=tmp.name,
+                    project=project,
+                    test_run_id=f"mission_{ref}_{reason}",
+                )
+                logger.info("[Agent] Screenshot evidence persisted (%s): %s", reason, upload.get("url"))
+                return upload.get("url")
+            finally:
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
+        except Exception as e:  # noqa: BLE001 — evidence upload must never break a step
+            logger.warning("[Agent] Screenshot evidence persistence failed: %s", e)
+            return None
+
+    def _kill_browser_manager(self):
+        """Terminate the persistent browser manager process (if any)."""
+        proc = getattr(self, "browser_process", None)
+        if proc is not None and self.sandbox:
+            try:
+                self.sandbox.commands.kill(proc.pid)
+            except Exception as e:  # noqa: BLE001 — stale process dies with the sandbox anyway
+                logger.warning("[Agent] Browser manager kill failed (continuing): %s", e)
+        self.browser_process = None
+
+    def _request_human_for_captcha(self, captcha_report):
+        """Escalate an unsolvable CAPTCHA to the user via the takeover channel.
+
+        Pauses the mission (UI shows takeover panel + live VNC feed), captures
+        one evidence screenshot of the challenge, and injects instructions for
+        after the human resumes.
+
+        Headless missions get a REAL human entry point: the GUI stack (Xvfb +
+        x11vnc + noVNC) is booted on demand inside the sandbox and the browser
+        manager is relaunched headful on :1, so the user can watch and solve
+        the challenge in Mission Control. Only if that boot fails do we fall
+        back to asking the user to resume/stop without a live view.
+        """
+        mission = getattr(self, "_current_mission", None)
+        if not mission:
+            logger.info("[Agent] CAPTCHA needs human but no mission context — skipping escalation")
+            return
+
+        shot_url = None
+        # Best-effort evidence screenshot of the challenge screen (before any
+        # browser relaunch loses the state).
+        try:
+            action = {"action": "screenshot"}
+            res = self._execute_browser_action(action)
+            if isinstance(res, dict):
+                b64 = res.get("screenshot_b64")
+                if b64:
+                    shot_url = self._persist_screenshot_evidence(b64, reason="captcha_escalation")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[Agent] CAPTCHA evidence capture failed: %s", e)
+
+        has_vnc = bool(getattr(self, "_vnc_url", None))
+        session_url_set = False
+
+        if not has_vnc and self.sandbox:
+            # Headless mission — boot the desktop on demand and relaunch the
+            # browser headful so the user has somewhere to actually click.
+            try:
+                logger.info("[Agent] Headless mission — booting GUI stack on demand for human help...")
+                self._start_gui_stack()
+                has_vnc = bool(getattr(self, "_vnc_url", None))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[Agent] On-demand GUI stack failed: %s", e)
+
+            if has_vnc:
+                try:
+                    mission.session_url = self._vnc_url
+                    session_url_set = True
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    self._kill_browser_manager()
+                    self._init_browser_manager()  # now launches headful (DISPLAY=:1)
+                    # Restore the challenge page so the human sees the widget.
+                    last_url = getattr(self, "_last_browser_url", None)
+                    if last_url and self.browser_process:
+                        try:
+                            self._execute_browser_action({
+                                "action": "navigate", "url": last_url,
+                                "auto_solve_captcha": False,
+                            })
+                        except Exception as nav_err:  # noqa: BLE001
+                            logger.warning("[Agent] Could not restore challenge page: %s", nav_err)
+                except Exception as rel_err:  # noqa: BLE001
+                    logger.warning("[Agent] Headful relaunch failed: %s", rel_err)
+
+        if has_vnc:
+            howto = ("The live desktop stream is available on this page — open it, solve the "
+                     "CAPTCHA manually in the visible browser, then click Resume.")
+            if session_url_set:
+                howto += " (Live view just came online for this mission.)"
+        else:
+            howto = ("This mission is running headless and the live desktop could not be started. "
+                     "Resume to let the agent retry automatically, stop the mission, "
+                     "or re-run with a browser (headed/VNC) runner to solve it yourself.")
+
+        kind = captcha_report.get("kind", "captcha")
+        detail = (captcha_report.get("detail") or "")[:200]
+        note = (f"[HUMAN HELP NEEDED] The agent is blocked by a {kind} CAPTCHA "
+                f"that cannot be solved automatically ({detail}). {howto}")
+
+        try:
+            AgentPrompt.objects.create(mission=mission, prompt=note, is_processed=False)
+        except Exception as e:
+            logger.warning("[Agent] Could not record CAPTCHA help prompt: %s", e)
+
+        mission.status = "paused"
+        mission.error_message = None
+        save_fields = ["status", "error_message"] + (["session_url"] if session_url_set else [])
+        mission.save(update_fields=save_fields)
+        self._auto_pause_active = True
+        self._auto_pause_started_at = time.time()
+        logger.warning("[Agent] Mission %s paused for human CAPTCHA help (%s)%s%s",
+                       mission.id, kind,
+                       f" — evidence: {shot_url}" if shot_url else "",
+                       " — live view online" if session_url_set else "")
 
     def _analyze_vision(self, b64_image):
         """Uses the Vision LLM to 'see' the screenshot."""
@@ -978,6 +1270,63 @@ run()
         cmd = f"locust -f /home/user/locustfile.py --headless -u {users} -r 2 -t 30s"
         return self._execute_shell_command({"command": cmd})
 
+    @staticmethod
+    def _extract_verification_signals(body):
+        """Extract OTP codes and verification/magic links from an email body.
+
+        Returns (otp, magic_link, links):
+          otp        — 4-8 digit code, preferring lines that mention code/otp/verify
+          magic_link — best-guess verification/activation/reset URL from the body
+          links      — up to 10 http(s) URLs found in the body (importance-ordered)
+        """
+        if not body:
+            return None, None, []
+
+        from html import unescape
+        text = unescape(body)
+
+        # Collect candidate URLs: anchor hrefs first, then bare URLs in plain text.
+        links = []
+        for m in re.finditer(r'href=["\']?(https?://[^"\'\s>]+)', text, re.IGNORECASE):
+            links.append(m.group(1))
+        for m in re.finditer(r'(https?://[^\s<>"\')\]]+)', text):
+            url = m.group(1).rstrip('.,;:!?')
+            if url not in links:
+                links.append(url)
+
+        # Drop known noise (unsubscribe, the mail provider's own links, socials).
+        ignored = ('unsubscribe', 'mail.tm', 'mailto:', 'twitter.com', 'x.com',
+                   'facebook.com', 'linkedin.com', 'instagram.com',
+                   'privacy', '/terms', '/blog', '/docs')
+        links = [u for u in links if not any(i in u.lower() for i in ignored)]
+
+        # Rank: verification-looking URLs win; first remaining link is the fallback.
+        strong = ('verify', 'confirm', 'activate', 'reset', 'magic', 'token',
+                  'auth', 'login', 'signin', 'sign-in', 'sign_in', 'invite',
+                  'set-password', 'setpassword', 'email-verify', 'verification')
+        magic_link = None
+        for u in links:
+            if any(s in u.lower() for s in strong):
+                magic_link = u
+                break
+        if magic_link is None and links:
+            magic_link = links[0]
+
+        # OTP: prefer codes on lines that talk about codes/OTPs/verification,
+        # so page furniture like a year ("© 2026") never matches first.
+        otp = None
+        for line in text.splitlines():
+            if re.search(r'(otp|code|verif|pin|one.?time|password reset)', line, re.IGNORECASE):
+                m = re.search(r'\b(\d{4,8})\b', line)
+                if m:
+                    otp = m.group(1)
+                    break
+        if otp is None:
+            m = re.search(r'\b(\d{6})\b', text)
+            otp = m.group(1) if m else None
+
+        return otp, magic_link, links[:10]
+
     def _execute_mail_action(self, action):
         """Manages disposable email addresses using Mail.tm."""
         mail_type = action.get("action") # 'create', 'get_messages', 'get_otp'
@@ -1020,22 +1369,67 @@ run()
             if not msgs_resp.get('member'):
                 return {"status": "waiting", "message": "No emails found yet."}
 
-            latest_msg = msgs_resp['member'][0]
-            
-            # 3. Get Full Content if needed
-            msg_detail = requests.get(f"https://api.mail.tm/messages/{latest_msg['id']}", headers=headers).json()
-            body = msg_detail.get('text') or msg_detail.get('html', "")
-            
-            # Simple OTP extraction helper
-            otp_match = re.search(r'\b\d{4,6}\b', body)
-            otp = otp_match.group(0) if otp_match else None
+            # Read the ENTIRE inbox (bounded) so nothing is missed when multiple
+            # emails arrive (e.g. welcome mail + OTP mail in quick succession).
+            messages_meta = msgs_resp.get('member', [])
+            messages = []
+            new_count = 0
+            otp_from_newest = None
+            link_from_newest = None
 
+            for meta in messages_meta[:10]:  # newest first, cap at 10
+                mid = meta.get('id')
+                try:
+                    msg_detail = requests.get(
+                        f"https://api.mail.tm/messages/{mid}", headers=headers, timeout=15
+                    ).json()
+                except Exception:
+                    msg_detail = {}
+                body = msg_detail.get('text') or ""
+                if not body:
+                    html_part = msg_detail.get('html', "")
+                    if isinstance(html_part, (list, tuple)):
+                        html_part = "\n".join(html_part)
+                    body = html_part or ""
+
+                otp, magic_link, links = self._extract_verification_signals(body)
+
+                is_new = mid not in self.seen_mail_ids
+                if is_new:
+                    new_count += 1
+                    self.seen_mail_ids.add(mid)
+
+                messages.append({
+                    "id": mid,
+                    "from": (meta.get('from') or {}).get('address'),
+                    "subject": meta.get('subject'),
+                    "intro": (meta.get('intro') or "")[:200],
+                    "body_preview": body[:500],
+                    "extracted_otp": otp,
+                    "magic_link": magic_link,
+                    "links": links,
+                    "created_at": meta.get('createdAt'),
+                    "is_new": is_new,
+                })
+                # Keep the newest message carrying a verification signal so
+                # re-polls never "lose" the code/link.
+                if otp_from_newest is None and otp:
+                    otp_from_newest = otp
+                if link_from_newest is None and magic_link:
+                    link_from_newest = magic_link
+
+            latest = messages[0]
             return {
                 "status": "success",
-                "subject": latest_msg.get('subject'),
-                "body": body[:500] + "...",
-                "extracted_otp": otp,
-                "created_at": latest_msg.get('createdAt')
+                "new_messages": new_count,
+                "total_messages": len(messages),
+                "messages": messages,
+                # Backward-compatible top-level fields (from the newest message):
+                "subject": latest.get("subject"),
+                "body": latest.get("body_preview", ""),
+                "extracted_otp": otp_from_newest,
+                "magic_link": link_from_newest,
+                "created_at": latest.get("created_at"),
             }
 
         except Exception as e:
@@ -1277,9 +1671,12 @@ YOUR TOOLSET:
 {"3. STRESS_TEST: Use this if the user wants to test performance." if has_load else ""}
 4. SHELL_COMMAND: Use this to run any CLI commands, check files, or use Linux tools.
    - For Security Missions, use: `sqlmap`, `nmap`, `zap-cli`, `gitleaks` (for secrets in code), or `owasp-dependency-check`.
-5. MAIL_ACTION: Use this to handle OTPs and real email verification.
+5. CAPTCHA HANDLING: Turnstile/reCAPTCHA/hCaptcha checkboxes and Cloudflare managed challenges are attempted automatically after every navigation. Interactive challenges (image grids) are auto-escalated: the mission pauses for HUMAN HELP (evidence screenshot captured, instructions injected) — when the user resumes, retry 'solve_captcha' once, then skip the blocker and note it in your final report. For 'NOT solved' (non-interactive) reports, wait and retry 'solve_captcha' yourself (optionally {{"diagnose": true}}) — do NOT abandon the mission over one failed attempt.
+6. MAIL_ACTION: Use this to handle OTPs, magic links and real email verification.
    - Use 'create' to get a new address.
-   - Use 'get_messages' to check the inbox and find OTP codes.
+   - Use 'get_messages' to read the FULL inbox. Every message includes 'extracted_otp' and 'magic_link'.
+   - 'magic_link' is the verification/activation URL extracted from the email — navigate to it with BROWSER_ACTION (or CALL_API it) instead of guessing the destination.
+   - Verification emails can arrive slightly after signup: if 'new_messages' is 0, wait (SHELL_COMMAND 'sleep 5') and poll 'get_messages' again.
 
 SCENARIO-SPECIFIC DIRECTIVES:
 {self._build_scenario_directives()}
@@ -1318,12 +1715,16 @@ Type A: CALL_API
 Type B: BROWSER_ACTION
 {{
   "type": "BROWSER_ACTION",
-  "action": "navigate/click/type/check",
+  "action": "navigate/click/type/check/uncheck/select/screenshot",
   "url": "...",
-  "selector": "css selector if clicking/typing",
-  "value": "text to type if action is 'type'",
+  "target_role": "button",
+  "target_name": "Create workspace",
+  "selector": "optional fallback: the 'suggested_selector' hint from the INTERACTIVE ELEMENTS list",
+  "value": "text to type, option to select, or key to press",
   "reason": "I need to see if the dashboard loads after login"
 }}
+
+After every BROWSER_ACTION you receive a structured OBSERVATION: URL, title, INTERACTIVE ELEMENTS (role, name, state, and a 'suggested_selector' hint), console errors, page errors, network failures, and TELEMETRY TOTALS. Identify targets by their SEMANTIC identity (role + name) and pass them as target_role/target_name — they are resolved against the live page at action time, so they stay correct even if the page changed. The suggested_selector is only a compatibility fallback. Screenshots are NOT taken automatically, including on most failures: add "capture_screenshot": true only when you specifically need visual evidence (layout checks, visual bugs, or a failure you consider significant).
 
 Type C: STRESS_TEST
 {{
@@ -1349,7 +1750,14 @@ Type E: MAIL_ACTION
   "reason": "I need a real email to sign up"
 }}
 
-Type F: FINISH
+Type F: BROWSER_ACTION (solve_captcha — only after a NOT-solved report)
+{{
+  "type": "BROWSER_ACTION",
+  "action": "solve_captcha",
+  "reason": "CAPTCHA was NOT solved after waiting; retrying the solver"
+}}
+
+Type G: FINISH
 {{ "type": "FINISH", "reason": "Story fully verified." }}
 """
 
