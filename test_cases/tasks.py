@@ -140,7 +140,7 @@ def project_auto_pilot_task(project_id, user_id, scenarios, batch_id, user_story
 
 
 @shared_task(name="collection_auto_pilot", time_limit=1800)  # 30 mins max
-def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user_story=None, runner_types=["http"], categories=["functional"], layer="backend", use_visual_ai=False, mission_id=None):
+def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user_story=None, runner_types=["http"], categories=["functional"], layer="backend", use_visual_ai=False, mission_id=None, endpoint_ids=None):
     """
     Collection-level Auto-Pilot background task.
     Generates and runs tests for all endpoints in a specific collection.
@@ -163,7 +163,10 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     final_story = user_story or collection.user_story or collection.description or collection.project.user_story or collection.project.description or ""
     
     # Auto-Pilot for each endpoint in the collection
-    endpoints = collection.endpoints.all()
+    if endpoint_ids:
+        endpoints = collection.endpoints.filter(id__in=endpoint_ids)
+    else:
+        endpoints = collection.endpoints.all()
     logger.info(f"[CollectionAutoPilot] Found {endpoints.count()} endpoints to process")
 
     # Iterate over categories (Functional, Security, etc.)

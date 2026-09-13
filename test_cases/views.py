@@ -991,6 +991,7 @@ class CollectionAutoPilotView(APIView):
 
         layer = request.data.get("layer", "backend")
         use_visual_ai = request.data.get("use_visual_ai", False)
+        endpoint_ids = request.data.get("endpoint_ids", [])
         
         # Auto-infer runner_types from layer if not provided
         runner_types = request.data.get("runner_types", [])
@@ -1064,7 +1065,8 @@ class CollectionAutoPilotView(APIView):
                 categories=categories,
                 layer=layer,
                 use_visual_ai=use_visual_ai,
-                mission_id=mission.id
+                mission_id=mission.id,
+                endpoint_ids=endpoint_ids
             )
             logger.info(f"[CollectionAutoPilotView] Task {task.id} queued successfully")
         except Exception as e:

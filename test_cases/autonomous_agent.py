@@ -1688,6 +1688,8 @@ INSTRUCTIONS:
    - PIVOTING: Once a feature has been "stressed" with variations, pivot to the next scenario or endpoint.
    - CRITICAL: You are NOT ALLOWED to call 'FINISH' until you have actually performed multiple tangible actions for each mission scenario.
 2. AUTHENTICATION STRATEGY:
+   - AUTH-GATED ENDPOINTS: Before testing your selected endpoints, scan the AVAILABLE API ENDPOINTS list. If most endpoints require authentication (auth_type != "none" or "apiKey" in headers), you MUST first find and call the login/auth endpoint to obtain a token. Store it and use it in subsequent requests.
+   - AUTH DISCOVERY: Look for endpoints like /login, /auth, /signin, /token, /register in the endpoint list. If none exist, try BROWSER_ACTION to navigate to the BASE URL and discover the auth flow.
    - FOR 3RD-PARTY AUTH (Google/GitHub/Social): Use the `GLOBAL TEST CREDENTIALS` provided. Click the social login button and type the corresponding email/password.
    - FOR STANDARD EMAIL SIGNUP/LOGIN: Use `MAIL_ACTION` tool. Use 'create' to get a `AGENT_EMAIL` before signup. Use 'get_messages' to retrieve OTPs.
    - For OTP/VERIFICATION FLOW: MAIL_ACTION 'create' BEFORE signup → use 'AGENT_EMAIL' in signup → MAIL_ACTION 'get_messages' to get OTP → verify.
