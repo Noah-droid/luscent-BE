@@ -1336,7 +1336,7 @@ run()
             if mail_type == "create":
                 # Get domain first
                 domain_resp = requests.get("https://api.mail.tm/domains").json()
-                domain = domain_resp['member'][0]['domain']
+                domain = domain_resp['hydra:member'][0]['domain']
                 username = f"agent_{int(time.time())}"
                 password = "password123"
                 email = f"{username}@{domain}"
@@ -1366,12 +1366,12 @@ run()
             headers = {"Authorization": f"Bearer {self.mail_session}"}
             msgs_resp = requests.get("https://api.mail.tm/messages", headers=headers).json()
             
-            if not msgs_resp.get('member'):
+            if not msgs_resp.get('hydra:member'):
                 return {"status": "waiting", "message": "No emails found yet."}
 
             # Read the ENTIRE inbox (bounded) so nothing is missed when multiple
             # emails arrive (e.g. welcome mail + OTP mail in quick succession).
-            messages_meta = msgs_resp.get('member', [])
+            messages_meta = msgs_resp.get('hydra:member', [])
             messages = []
             new_count = 0
             otp_from_newest = None
