@@ -313,6 +313,12 @@ E2B_API_KEY = config('E2B_API_KEY', default=None)
 # The default template for E2B sandboxes
 E2B_SANDBOX_TEMPLATE = config('E2B_SANDBOX_TEMPLATE', default='base')
 
+# Observation V2: structured Playwright perception (aria snapshot, element
+# inventory, console/network telemetry) instead of screenshot → vision LLM
+# after every browser action. Screenshots become explicit evidence/fallback.
+# Set PERCEPTION_V2=false to run the legacy perception path for A/B comparison.
+PERCEPTION_V2 = config('PERCEPTION_V2', default=True, cast=bool)
+
 
 
 LOGGING = {
