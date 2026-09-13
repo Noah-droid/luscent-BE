@@ -142,6 +142,29 @@ def run_swagger_import(job):
         job.save(update_fields=["status", "imported_count", "error", "spec_text", "finished_at"])
 
 
+def _run_in_thread(job):
+    """Daemon-thread entry point for swagger imports on hosts with no live worker.
+
+    Re-fetches the job by id (never reuse the request thread's ORM instance
+    across threads), runs the import, and swallows all exceptions — a thread
+    must never propagate back into the request.
+    """
+    from django.db import close_old_connections
+
+    close_old_connections()
+    try:
+        job_id = job.id if isinstance(job, ImportJob) else job
+        fresh = ImportJob.objects.filter(id=job_id).first()
+        if fresh is None:
+            logger.error("Swagger import thread: job %s no longer exists", job_id)
+            return
+        run_swagger_import(fresh)
+    except Exception:
+        logger.exception("Swagger import thread failed")
+    finally:
+        close_old_connections()
+
+
 def queue_swagger_import(collection, *, source="url", spec_name="", spec_text=None, skip_validation=False):
     """
     Create an ImportJob and dispatch it to Celery. Falls back to an in-process run

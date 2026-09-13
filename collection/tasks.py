@@ -7,7 +7,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-@shared_task(name="import_swagger", bind=True, soft_time_limit=120)
+@shared_task(name="import_swagger", bind=True, soft_time_limit=120, track_started=True)
 def import_swagger_task(self, job_id):
     """Celery task to run a swagger ImportJob (URL or inline file payload)."""
     job = get_object_or_404(ImportJob, id=job_id)

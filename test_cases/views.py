@@ -652,10 +652,30 @@ class ProjectStatusView(APIView):
         
         total_tests = test_cases.count()
         if total_tests == 0:
+            # No test cases yet — but the project may already have imported
+            # endpoints. Return them with "no_runs" so the UI lists them
+            # instead of showing an empty page.
+            from collection.models import Endpoint
+            endpoints = Endpoint.objects.filter(collection__project=project).select_related('collection')
             return Response({
                 "project_name": project.name,
+                "project_id": str(project.id),
                 "summary": {"total": 0, "passed": 0, "failed": 0, "pass_rate": 0},
-                "endpoints": []
+                "endpoints": [
+                    {
+                        "id": e.id,
+                        "name": e.name,
+                        "method": e.method,
+                        "url": e.url,
+                        "collection_id": e.collection.id,
+                        "collection_name": e.collection.name,
+                        "total_tests": 0,
+                        "failed_tests": 0,
+                        "status": "no_runs",
+                        "tests": [],
+                    }
+                    for e in endpoints
+                ]
             })
 
         # Group by Endpoint — all done in 4 queries total (endpoints, test_cases, runs, done)
@@ -1086,13 +1106,29 @@ class CollectionStatusView(APIView):
         
         total_tests = test_cases.count()
         if total_tests == 0:
+            # No test cases yet — but the collection may already have imported
+            # endpoints. Return them with "no_runs" so the UI lists them
+            # instead of showing an empty page.
             return Response({
                 "collection_name": collection.name,
                 "collection_id": str(collection.id),
                 "project_name": collection.project.name,
+                "project_id": str(collection.project.id),
                 "preferred_test_types": collection.project.preferred_test_types or [],
                 "summary": {"total": 0, "passed": 0, "failed": 0, "pass_rate": 0},
-                "endpoints": []
+                "endpoints": [
+                    {
+                        "id": e.id,
+                        "name": e.name,
+                        "method": e.method,
+                        "url": e.url,
+                        "total_tests": 0,
+                        "failed_tests": 0,
+                        "status": "no_runs",
+                        "tests": [],
+                    }
+                    for e in endpoints
+                ]
             })
         
         # Group by Endpoint — all done in ~4 queries total
