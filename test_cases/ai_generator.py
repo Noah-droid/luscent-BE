@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class AITestGenerator:
     def __init__(self):
         # Configurable via settings
-        self.provider = getattr(settings, 'LLM_PROVIDER', 'openai').lower()
+        self.provider = getattr(settings, 'LLM_PROVIDER', 'openai').strip().lower()
         self.openai_api_key = getattr(settings, 'LLM_API_KEY', None)
         self.openai_base_url = getattr(settings, 'LLM_BASE_URL', "https://api.openai.com/v1")
         self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)

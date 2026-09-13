@@ -48,7 +48,7 @@ class AutonomousAgent:
                 self.runner_types = ["http"]
         
         # LLM Config
-        self.provider = getattr(settings, 'LLM_PROVIDER', 'gemini').lower() 
+        self.provider = getattr(settings, 'LLM_PROVIDER', 'gemini').strip().lower()
         self.openai_api_key = getattr(settings, 'LLM_API_KEY', None)
         self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)
         self.nvidia_api_key = getattr(settings, 'NVIDIA_NIM_API_KEY', None)
