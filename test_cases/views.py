@@ -801,7 +801,9 @@ class ProjectAutoPilotView(APIView):
                 'runner_types': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING, enum=['http', 'load', 'browser']), default=['http']),
                 'categories': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING), default=['functional']),
                 'layer': openapi.Schema(type=openapi.TYPE_STRING, default='backend'),
-                'use_visual_ai': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=False)
+                'use_visual_ai': openapi.Schema(type=openapi.TYPE_BOOLEAN, default=False),
+                'endpoint_ids': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING),
+                    description="Optional: Test only these endpoint UUIDs instead of all endpoints")
             }
         ),
         responses={202: "Auto-Pilot started"}
@@ -810,6 +812,7 @@ class ProjectAutoPilotView(APIView):
         project = get_object_or_404(Project, id=project_id, user=request.user)
         scenarios = request.data.get("scenarios", ["HAPPY_PATH", "VALIDATION_ERROR", "SECURITY"])
         user_story = request.data.get("user_story", "")
+        endpoint_ids = request.data.get("endpoint_ids", [])
         
         # Parse lists directly, fallback to single legacy keys if needed
         runner_types = request.data.get("runner_types", [])
@@ -874,7 +877,8 @@ class ProjectAutoPilotView(APIView):
         from .tasks import run_autonomous_mission_task
         run_autonomous_mission_task.delay(
             mission_id=mission.id,
-            user_id=request.user.id
+            user_id=request.user.id,
+            endpoint_ids=endpoint_ids
         )
 
         return Response({

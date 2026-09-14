@@ -215,7 +215,8 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
         categories=categories,
         layer=layer,
         runner_types=runner_types,
-        mission_id=mission.id
+        mission_id=mission.id,
+        endpoint_ids=endpoint_ids or []
     )
     
     # 3. Run The Mission (Blocking Call - The Agent thinks and acts)
@@ -432,7 +433,7 @@ def check_periodic_schedules_task():
 
 
 @shared_task(name="run_autonomous_mission", time_limit=3600) # 1 hour max for deep audits
-def run_autonomous_mission_task(mission_id, user_id):
+def run_autonomous_mission_task(mission_id, user_id, endpoint_ids=None):
     """
     Standardizes the launch of an Autonomous Agent for a specific Mission instance.
     """
@@ -493,7 +494,8 @@ def run_autonomous_mission_task(mission_id, user_id):
         layer="backend",
         runner_types=["http", "browser"], # default to both for missions
         mission_id=mission.id,
-        is_safe_mode=mission.is_safe_mode
+        is_safe_mode=mission.is_safe_mode,
+        endpoint_ids=endpoint_ids or []
     )
     
     # Load browser config if any

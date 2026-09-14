@@ -23,12 +23,13 @@ class AutonomousAgent:
     A Self-Driving QA Agent that executes API tests live, reacts to errors,
     and maintains state like a human tester.
     """
-    def __init__(self, collection, user_story=None, env_vars=None, scenarios=None, categories=None, layer="backend", runner_types=None, mission_id=None, is_safe_mode=True):
+    def __init__(self, collection, user_story=None, env_vars=None, scenarios=None, categories=None, layer="backend", runner_types=None, mission_id=None, is_safe_mode=True, endpoint_ids=None):
         self.collection = collection
         self.mission_id = mission_id
         self.is_safe_mode = is_safe_mode
         self.user_story = user_story or "Explore the API and ensure core functionality works."
         self.env_vars = env_vars or {}
+        self.endpoint_ids = endpoint_ids or []
         self.browser_process = None # Persistent browser process for live view
         self.previous_failures = [] # Populated for regression missions
 
@@ -147,10 +148,18 @@ class AutonomousAgent:
 
         # 1. Understudy: Initialize Context
         # We now include the schema and ensure IDs are strings for the JSON prompt.
-        endpoints_raw = list(self.collection.endpoints.values(
+        endpoints_qs = self.collection.endpoints.values(
             'id', 'method', 'url', 'name', 'description', 
             'request_body', 'query_params', 'auth_type', 'headers'
-        ))
+        )
+        if self.endpoint_ids:
+            from django.db.models import Q
+            uuid_filters = [Q(id=str(eid)) for eid in self.endpoint_ids]
+            combined = uuid_filters[0]
+            for f in uuid_filters[1:]:
+                combined |= f
+            endpoints_qs = endpoints_qs.filter(combined)
+        endpoints_raw = list(endpoints_qs)
         
         # Format for AI: Convert UUIDs to strings and clean up
         endpoints = []
