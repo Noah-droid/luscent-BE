@@ -1831,6 +1831,51 @@ class AgentTakeoverView(APIView):
         return Response({"error": "Invalid action. Use 'pause', 'resume', or 'stop'."}, status=400)
 
 
+class MissionRerunView(APIView):
+    """
+    Creates a new mission with the same config as a previous one and starts it.
+    POST /test-cases/missions/<batch_id>/rerun/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(
+        operation_description="Rerun a previous mission with the same configuration",
+        responses={202: "New mission started"}
+    )
+    def post(self, request, batch_id):
+        original = get_object_or_404(AgentMission, batch_id=batch_id, user=request.user)
+
+        import uuid
+        new_batch_id = uuid.uuid4()
+
+        new_mission = AgentMission.objects.create(
+            user=request.user,
+            collection=original.collection,
+            user_story=original.user_story,
+            mission_type=original.mission_type,
+            batch_id=new_batch_id,
+            browser_config=original.browser_config or {},
+            is_safe_mode=original.is_safe_mode,
+            load_config=original.load_config or {},
+            scenarios=original.scenarios or [],
+            categories=original.categories or [],
+            status="running"
+        )
+
+        from .tasks import run_autonomous_mission_task
+        run_autonomous_mission_task.delay(
+            mission_id=new_mission.id,
+            user_id=request.user.id
+        )
+
+        logger.info(f"[MissionRerun] Started new mission {new_batch_id} based on {batch_id}")
+        return Response({
+            "message": "Mission rerun started",
+            "batch_id": str(new_batch_id),
+            "mission_id": new_mission.id
+        }, status=status.HTTP_202_ACCEPTED)
+
+
 class DatasetExportView(APIView):
     """
     INTERNAL: Exports training data for QA model fine-tuning.

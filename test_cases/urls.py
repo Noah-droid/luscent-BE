@@ -9,7 +9,7 @@ from .views import (
     AgentMissionListView, AgentMissionDetailView, AgentMissionPromptView,
     SessionReportView, SessionHistoryView, SessionComparisonView,
     DashboardSummaryView, BatchReportView,
-    AgentTakeoverView, DatasetExportView
+    AgentTakeoverView, DatasetExportView, MissionRerunView
 )
 
 urlpatterns = [
@@ -47,6 +47,9 @@ urlpatterns = [
     
     # Human Takeover
     path("missions/<uuid:batch_id>/takeover/", AgentTakeoverView.as_view(), name="agent-takeover"),
+    
+    # Mission Rerun
+    path("missions/<uuid:batch_id>/rerun/", MissionRerunView.as_view(), name="mission-rerun"),
     
     # Dataset Export
     path("datasets/export/", DatasetExportView.as_view(), name="dataset-export"),
