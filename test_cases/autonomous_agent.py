@@ -23,13 +23,14 @@ class AutonomousAgent:
     A Self-Driving QA Agent that executes API tests live, reacts to errors,
     and maintains state like a human tester.
     """
-    def __init__(self, collection, user_story=None, env_vars=None, scenarios=None, categories=None, layer="backend", runner_types=None, mission_id=None, is_safe_mode=True, endpoint_ids=None):
+    def __init__(self, collection, user_story=None, env_vars=None, scenarios=None, categories=None, layer="backend", runner_types=None, mission_id=None, is_safe_mode=True, endpoint_ids=None, load_config=None):
         self.collection = collection
         self.mission_id = mission_id
         self.is_safe_mode = is_safe_mode
         self.user_story = user_story or "Explore the API and ensure core functionality works."
         self.env_vars = env_vars or {}
         self.endpoint_ids = endpoint_ids or []
+        self.load_config = load_config or {}
         self.browser_process = None # Persistent browser process for live view
         self.previous_failures = [] # Populated for regression missions
 
@@ -1276,14 +1277,15 @@ run()
             return {"error": "Sandbox not available for stress tests."}
             
         target_ids = action.get("endpoints_to_hit", [])
-        users = action.get("users", 10)
+        # Use agent-level load_config if available, else action params, else defaults
+        load_cfg = getattr(self, 'load_config', {}) or {}
+        users = action.get("users", load_cfg.get("users", 10))
+        spawn_rate = action.get("spawn_rate", load_cfg.get("spawnRate", 2))
+        duration = action.get("duration", load_cfg.get("duration", "30s"))
         
-        # We can dynamically pass the data to the pre-installed locustfile
-        logger.info(f"[Agent] E2B Stress Test requested for {len(target_ids)} endpoints.")
+        logger.info(f"[Agent] E2B Stress Test: {users} users, spawn_rate={spawn_rate}, duration={duration}")
         
-        # For simplicity in this refactor, we just run a basic locust command
-        # A more advanced version would use the locustfile we copied into the template
-        cmd = f"locust -f /home/user/locustfile.py --headless -u {users} -r 2 -t 30s"
+        cmd = f"locust -f /home/user/locustfile.py --headless -u {users} -r {spawn_rate} -t {duration}"
         return self._execute_shell_command({"command": cmd})
 
     @staticmethod
@@ -1750,8 +1752,9 @@ Type C: STRESS_TEST
   "type": "STRESS_TEST",
   "scenario_name": "...",
   "endpoints_to_hit": ["endpoint_id_1", "endpoint_id_2"],
-  "users": 100,
-  "spawn_rate": 10,
+  "users": 10,
+  "spawn_rate": 2,
+  "duration": "30s",
   "reason": "The user wants to ensure the signup flow doesn't crash under pressure"
 }}
 

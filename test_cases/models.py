@@ -196,6 +196,7 @@ class AgentMission(models.Model):
     app_url = models.URLField(blank=True, null=True, help_text="Public URL to the user's app running inside the sandbox")
     error_message = models.TextField(blank=True, null=True, help_text="Why the mission failed (billing, setup, etc.)")
     is_safe_mode = models.BooleanField(default=True, help_text="In Safe Mode, the agent avoids destructive actions (Delete, Update) on production URLs.")
+    load_config = models.JSONField(default=dict, blank=True, help_text="Load test config: {'users': 10, 'spawnRate': 2, 'duration': '30s'}")
     
     # Mission configuration (persisted so tasks can read user-selected scenarios)
     scenarios = models.JSONField(default=list, blank=True, help_text='User-selected scenarios: ["HAPPY_PATH", "SECURITY", ...]')

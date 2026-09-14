@@ -216,7 +216,8 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
         layer=layer,
         runner_types=runner_types,
         mission_id=mission.id,
-        endpoint_ids=endpoint_ids or []
+        endpoint_ids=endpoint_ids or [],
+        load_config=mission.load_config or {}
     )
     
     # 3. Run The Mission (Blocking Call - The Agent thinks and acts)
@@ -495,7 +496,8 @@ def run_autonomous_mission_task(mission_id, user_id, endpoint_ids=None):
         runner_types=["http", "browser"], # default to both for missions
         mission_id=mission.id,
         is_safe_mode=mission.is_safe_mode,
-        endpoint_ids=endpoint_ids or []
+        endpoint_ids=endpoint_ids or [],
+        load_config=mission.load_config or {}
     )
     
     # Load browser config if any
