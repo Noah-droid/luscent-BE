@@ -78,8 +78,7 @@ jobs:
             done
 
             echo "=== Stopping old containers ==="
-            docker stop web celery 2>/dev/null || true
-            docker rm web celery 2>/dev/null || true
+            docker rm -f web celery 2>/dev/null || true
 
             echo "=== Starting API ==="
             docker run -d \
