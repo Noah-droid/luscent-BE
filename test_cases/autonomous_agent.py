@@ -214,7 +214,11 @@ class AutonomousAgent:
                 # Start GUI stack (Xvfb + VNC) for live view — runs AFTER
                 # whitebox so the VNC URL is the one persisted to session_url
                 # (used by the frontend iframe for live visual monitoring).
-                self._start_gui_stack()
+                # Skip for backend-only tests — no browser needed.
+                if self.layer != 'backend' or 'browser' in (self.runner_types or []):
+                    self._start_gui_stack()
+                else:
+                    logger.info("[Agent] Backend-only layer — skipping GUI stack (no live view needed)")
 
                 # Persist URLs to the mission model
                 if mission:
@@ -532,6 +536,9 @@ class AutonomousAgent:
         
         # We generate a small python script to run in the sandbox
         # This ensures cookies/headers stay in the sandbox if we used a browser before
+        body_json = json.dumps(req_data.get("body")) if req_data.get("body") else "None"
+        params_json = json.dumps(req_data.get("params")) if req_data.get("params") else "{}"
+        headers_json = json.dumps(req_data.get("headers")) if req_data.get("headers") else "{}"
         script = f"""
 import requests
 import json
@@ -541,9 +548,9 @@ try:
     resp = requests.request(
         method='{target['method']}',
         url='{resolved_url}',
-        headers={json.dumps(req_data.get("headers", {}))},
-        json={json.dumps(req_data.get("body"))} if '{target['method']}' in ['POST', 'PUT', 'PATCH'] else None,
-        params={json.dumps(req_data.get("params"))},
+        headers={headers_json},
+        json={body_json} if '{target['method']}' in ['POST', 'PUT', 'PATCH'] else None,
+        params={params_json},
         timeout=30
     )
     print(json.dumps({{
@@ -1700,10 +1707,11 @@ INSTRUCTIONS:
    - AUTH-GATED ENDPOINTS: Before testing your selected endpoints, scan the AVAILABLE API ENDPOINTS list. If most endpoints require authentication (auth_type != "none" or "apiKey" in headers), you MUST first find and call the login/auth endpoint to obtain a token. Store it and use it in subsequent requests.
    - AUTH DISCOVERY: Look for endpoints like /login, /auth, /signin, /token, /register in the endpoint list. If none exist, try BROWSER_ACTION to navigate to the BASE URL and discover the auth flow.
    - FOR 3RD-PARTY AUTH (Google/GitHub/Social): Use the `GLOBAL TEST CREDENTIALS` provided. Click the social login button and type the corresponding email/password.
-   - FOR STANDARD EMAIL SIGNUP/LOGIN: Use `MAIL_ACTION` tool. Use 'create' to get a `AGENT_EMAIL` before signup. Use 'get_messages' to retrieve OTPs.
-   - For OTP/VERIFICATION FLOW: MAIL_ACTION 'create' BEFORE signup → use 'AGENT_EMAIL' in signup → MAIL_ACTION 'get_messages' to get OTP → verify.
+   - FOR STANDARD EMAIL SIGNUP/LOGIN: Use `MAIL_ACTION` tool with action 'create' to get a real disposable email. The response contains the email address. You MUST use that EXACT email address in subsequent registration/login API calls. NEVER use placeholder emails like 'testuser@example.com' or 'test@example.com'. The created email is reusable across steps.
+   - For OTP/VERIFICATION FLOW: MAIL_ACTION 'create' BEFORE signup → use the returned email in signup payload → MAIL_ACTION 'get_messages' to get OTP → verify.
 3. COMPLIANCE CHECKLIST: Before every move, mentally check off which scenarios from {self.scenarios} you have already verified. Do not finish until you have diverse coverage for ALL of them.
-4. SCHEMA OBSESSION: Before calling any API, check its 'request_body' field in the AVAILABLE API ENDPOINTS list. This is your MANDATORY template. Match its keys and casing EXACTLY. Also check 'auth_type' and 'headers' per endpoint.
+4. SCHEMA OBSESSION: Before calling any API, check its 'request_body' field in the AVAILABLE API ENDPOINTS list. Match its keys and casing EXACTLY. Also check 'auth_type' and 'headers' per endpoint.
+   - CRITICAL: NEVER copy encrypted, encoded, or hashed values from the request_body schema. Those are stored examples, not real data. Generate FRESH, PLAIN-TEXT test data for every field. For example: use a real date like "1990-05-15" for dob, a numeric string like "12345678901" for nin, "testuser_123@example.com" for email (or the AGENT_EMAIL if available), etc.
 5. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY for the correct keys. If the server says "FirstName is required", look at your casing! Use the exact keys the server's error message suggests.
 {"6. UI EXPLORATION: If 'AVAILABLE API ENDPOINTS' is empty but you have a 'BASE URL', start by using BROWSER_ACTION 'navigate' to the BASE URL to discover the application." if has_browser else ""}
 7. SAFE MODE GUARDRAILS: {"ENABLED" if self.is_safe_mode else "DISABLED"}

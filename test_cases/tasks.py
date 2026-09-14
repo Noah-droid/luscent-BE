@@ -503,6 +503,7 @@ def run_autonomous_mission_task(mission_id, user_id, endpoint_ids=None):
         agent.browser_config = mission.browser_config
 
     # 4. Run Mission
+    from django.utils import timezone as tz
     try:
         mission_depth = 40 if mission.mission_type == "security_audit" else 25
         steps_log = agent.run_mission(max_steps=mission_depth)
@@ -511,7 +512,7 @@ def run_autonomous_mission_task(mission_id, user_id, endpoint_ids=None):
         mission_summary = ""
         for step in steps_log:
             if step['action'] == 'FINISH':
-                mission_summary = step.get('reason', '')
+                mission_summary = step.get('details', {}).get('reason', '')
                 continue
             
             if step['action'] in ['CALL_API', 'BROWSER_ACTION', 'SHELL_COMMAND', 'MAIL_ACTION']:
@@ -522,11 +523,13 @@ def run_autonomous_mission_task(mission_id, user_id, endpoint_ids=None):
                 if not endpoint:
                     endpoint = collection.endpoints.first()
                 
+                step_details = step.get('details', {})
+                step_reason = step_details.get('reason', step.get('action', ''))
                 if endpoint:
                     test_case = TestCase.objects.create(
                         endpoint=endpoint,
-                        name=f"{mission.get_mission_type_display()} Step: {step.get('endpoint', step['action'])}",
-                        description=step['reason'],
+                        name=f"{mission.get_mission_type_display()} Step: {step_details.get('endpoint', step['action'])}",
+                        description=step_reason,
                         runner_type="browser" if step['action'] == 'BROWSER_ACTION' else "http",
                         category=categories[0],
                         ai_generated=True,
@@ -541,12 +544,11 @@ def run_autonomous_mission_task(mission_id, user_id, endpoint_ids=None):
                         response_status=step.get('response', {}).get('status') if 'response' in step else None,
                         response_body=step.get('response', {}).get('body') if 'response' in step else step.get('error'),
                         response_time_ms=step.get('response', {}).get('duration_ms', 0) if 'response' in step else 0,
-                        logs=f"MISSION TYPE: {mission.mission_type.upper()}\nTHOUGHT: {step['reason']}\n\n{step.get('logs','')}",
+                        logs=f"MISSION TYPE: {mission.mission_type.upper()}\nTHOUGHT: {step_reason}\n\n{step.get('logs','')}",
                         triggered_by="ai_agent"
                     )
         
         # Populate session report summary
-        from django.utils import timezone as tz
         mission.status = "completed"
         mission.completed_at = tz.now()
         mission.total_steps = mission.steps.count()
