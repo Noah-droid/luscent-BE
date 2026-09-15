@@ -1342,8 +1342,8 @@ run()
         if think_time > 0:
             cmd += f" --think-time {think_time}"
         if load_mode == "step":
-            step_users = max(1, users // 5)
-            step_time = max(1, ramp_up_duration // 5)
+            step_users = spawn_rate  # UI sends step size via spawnRate
+            step_time = ramp_up_duration  # UI sends step time via rampUpDuration
             cmd += f" --step-load --step-users {step_users} --step-time {step_time}s"
         
         return self._execute_shell_command({"command": cmd})
