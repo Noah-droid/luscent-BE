@@ -1282,10 +1282,20 @@ run()
         users = action.get("users", load_cfg.get("users", 10))
         spawn_rate = action.get("spawn_rate", load_cfg.get("spawnRate", 2))
         duration = action.get("duration", load_cfg.get("duration", "30s"))
+        think_time = action.get("think_time", load_cfg.get("thinkTime", 0))
+        load_mode = action.get("load_mode", load_cfg.get("mode", "constant"))
+        ramp_up_duration = action.get("ramp_up_duration", load_cfg.get("rampUpDuration", 10))
         
-        logger.info(f"[Agent] E2B Stress Test: {users} users, spawn_rate={spawn_rate}, duration={duration}")
+        logger.info(f"[Agent] E2B Stress Test: {users} users, spawn_rate={spawn_rate}, duration={duration}, mode={load_mode}, think_time={think_time}ms")
         
         cmd = f"locust -f /home/user/locustfile.py --headless -u {users} -r {spawn_rate} -t {duration}"
+        if think_time > 0:
+            cmd += f" --think-time {think_time}"
+        if load_mode == "step":
+            step_users = max(1, users // 5)
+            step_time = max(1, ramp_up_duration // 5)
+            cmd += f" --step-load --step-users {step_users} --step-time {step_time}s"
+        
         return self._execute_shell_command({"command": cmd})
 
     @staticmethod
@@ -1521,7 +1531,9 @@ run()
                 "PERFORMANCE: Use STRESS_TEST tool to load-test critical endpoints:\n"
                 "  - Test with 10-50 concurrent users on key endpoints\n"
                 "  - Focus on endpoints that handle authentication, data creation, and search\n"
-                "  - Look for response times > 2s or error rates > 5%"
+                "  - Look for response times > 2s or error rates > 5%\n"
+                "  - Use think_time to simulate realistic pauses between requests\n"
+                "  - Use load_mode 'step' to gradually increase load, 'ramp' for linear ramp-up"
             ),
             'REGRESSION': (
                 "REGRESSION: Re-run previously failed test scenarios and verify fixes.\n"
@@ -1755,6 +1767,9 @@ Type C: STRESS_TEST
   "users": 10,
   "spawn_rate": 2,
   "duration": "30s",
+  "think_time": 0,
+  "ramp_up_duration": 10,
+  "load_mode": "constant",
   "reason": "The user wants to ensure the signup flow doesn't crash under pressure"
 }}
 
