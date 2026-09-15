@@ -309,6 +309,9 @@ def send_batch_report(batch_id, user):
     """
 
     try:
+        if not user.email:
+            logger.warning(f"Cannot send batch report: user {user.id} has no email address")
+            return
         resend.Emails.send({
             "from": settings.DEFAULT_FROM_EMAIL,
             "to": [user.email],

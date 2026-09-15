@@ -221,13 +221,19 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
     )
     
     # 3. Run The Mission (Blocking Call - The Agent thinks and acts)
+    from django.db import connection
     try:
         # Increase max_steps for deep multi-scenario testing
         scenario_list = scenarios if isinstance(scenarios, list) else (scenarios.split(',') if isinstance(scenarios, str) else [])
         story_length_bonus = 30 if len(final_story) > 1000 else 0
         mission_depth = min(100, (20 + (len(scenario_list) * 10) + story_length_bonus))
         
+        # Close DB connection before the long-running agent to avoid Neon pooler
+        # killing idle connections during the mission.
+        connection.close()
         steps_log = agent.run_mission(max_steps=mission_depth)
+        # Reconnect for DB writes
+        connection.ensure_connection()
         logger.info(f"[CollectionAutoPilot] Agent completed {len(steps_log)} steps for {len(scenario_list)} scenarios.")
         
         # 4. Convert Agent Logs to Test Runs (For Dashboard Visibility)
@@ -300,6 +306,11 @@ def collection_auto_pilot_task(collection_id, user_id, scenarios, batch_id, user
         mission.save()
     except Exception as e:
         logger.error(f"[CollectionAutoPilot] Agent Mission Failed: {e}")
+        # Reconnect in case the long agent run killed the connection
+        try:
+            connection.ensure_connection()
+        except Exception:
+            pass
         if mission:
             from django.utils import timezone as tz
             mission.status = "error"
@@ -367,9 +378,13 @@ def send_batch_report_task(batch_id, user_id):
     Wait a bit to ensure all tasks in the batch have likely finished.
     """
     import time
+    from django.db import connection
     from users.models import User
     from .models import TestRun
     from notifications.services import send_batch_report
+    
+    # Ensure fresh DB connection
+    connection.ensure_connection()
     
     # Wait for completion (simple polling for 30s max)
     user = User.objects.get(id=user_id)
@@ -506,9 +521,15 @@ def run_autonomous_mission_task(mission_id, user_id, endpoint_ids=None):
 
     # 4. Run Mission
     from django.utils import timezone as tz
+    from django.db import connection
     try:
         mission_depth = 40 if mission.mission_type == "security_audit" else 25
+        # Close DB connection before the long-running agent to avoid Neon pooler
+        # killing idle connections during the mission (can take 5-15 minutes).
+        connection.close()
         steps_log = agent.run_mission(max_steps=mission_depth)
+        # Reconnect for DB writes
+        connection.ensure_connection()
         
         # 5. Conversion to TestRuns logic (Same as CollectionAutoPilot)
         mission_summary = ""
@@ -569,6 +590,11 @@ def run_autonomous_mission_task(mission_id, user_id, endpoint_ids=None):
         
     except Exception as e:
         logger.error(f"Mission {mission_id} failed: {e}")
+        # Reconnect in case the long agent run killed the connection
+        try:
+            connection.ensure_connection()
+        except Exception:
+            pass
         mission.status = "error"
         mission.completed_at = tz.now()
         err_str = str(e).lower()
