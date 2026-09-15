@@ -1261,7 +1261,7 @@ class AgentMissionDetailView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
     
     def get_queryset(self):
-        return AgentMission.objects.filter(user=self.request.user)
+        return AgentMission.objects.filter(user=self.request.user).select_related('collection', 'collection__project').prefetch_related('steps')
 
     def get_object(self):
         batch_id = self.kwargs.get("batch_id")
