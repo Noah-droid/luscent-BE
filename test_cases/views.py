@@ -880,7 +880,11 @@ class ProjectAutoPilotView(APIView):
         run_autonomous_mission_task.delay(
             mission_id=mission.id,
             user_id=request.user.id,
-            endpoint_ids=endpoint_ids
+            endpoint_ids=endpoint_ids,
+            runner_types=runner_types,
+            layer=layer,
+            scenarios=scenarios,
+            categories=categories
         )
 
         return Response({
@@ -1865,7 +1869,11 @@ class MissionRerunView(APIView):
         from .tasks import run_autonomous_mission_task
         run_autonomous_mission_task.delay(
             mission_id=new_mission.id,
-            user_id=request.user.id
+            user_id=request.user.id,
+            runner_types=["http"],  # Rerun with backend-only by default
+            layer="backend",
+            scenarios=original.scenarios or [],
+            categories=original.categories or []
         )
 
         logger.info(f"[MissionRerun] Started new mission {new_batch_id} based on {batch_id}")

@@ -449,7 +449,7 @@ def check_periodic_schedules_task():
 
 
 @shared_task(name="run_autonomous_mission", time_limit=3600) # 1 hour max for deep audits
-def run_autonomous_mission_task(mission_id, user_id, endpoint_ids=None):
+def run_autonomous_mission_task(mission_id, user_id, endpoint_ids=None, runner_types=None, layer=None, scenarios=None, categories=None):
     """
     Standardizes the launch of an Autonomous Agent for a specific Mission instance.
     """
@@ -484,31 +484,46 @@ def run_autonomous_mission_task(mission_id, user_id, endpoint_ids=None):
     project = collection.project
     project_vars = project.environment_variables or {}
     
+    # Use passed parameters, fall back to mission model, then defaults
+    if runner_types is not None:
+        effective_runner_types = runner_types
+    else:
+        effective_runner_types = ["http"]
+    
+    if layer is not None:
+        effective_layer = layer
+    else:
+        effective_layer = "backend"
+    
     # Use user-selected scenarios from the mission (persisted at creation time)
     # Fallback to mission_type defaults only if nothing was stored
-    if mission.scenarios:
-        scenarios = mission.scenarios if isinstance(mission.scenarios, list) else [mission.scenarios]
+    if scenarios is not None:
+        effective_scenarios = scenarios
+    elif mission.scenarios:
+        effective_scenarios = mission.scenarios if isinstance(mission.scenarios, list) else [mission.scenarios]
     elif mission.mission_type == "security_audit":
-        scenarios = ["SECURITY", "AUTH_BYPASS", "INJECTION", "IDOR"]
+        effective_scenarios = ["SECURITY", "AUTH_BYPASS", "INJECTION", "IDOR"]
     else:
-        scenarios = ["HAPPY_PATH", "VALIDATION_ERROR", "EDGE_CASE"]
+        effective_scenarios = ["HAPPY_PATH", "VALIDATION_ERROR", "EDGE_CASE"]
     
-    if mission.categories:
-        categories = mission.categories
+    if categories is not None:
+        effective_categories = categories
+    elif mission.categories:
+        effective_categories = mission.categories
     elif mission.mission_type == "security_audit":
-        categories = ["security"]
+        effective_categories = ["security"]
     else:
-        categories = ["functional"]
+        effective_categories = ["functional"]
 
     # 3. Initialize Agent
     agent = AutonomousAgent(
         collection,
         user_story=mission.user_story,
         env_vars=project_vars,
-        scenarios=scenarios,
-        categories=categories,
-        layer="backend",
-        runner_types=["http", "browser"], # default to both for missions
+        scenarios=effective_scenarios,
+        categories=effective_categories,
+        layer=effective_layer,
+        runner_types=effective_runner_types,
         mission_id=mission.id,
         is_safe_mode=mission.is_safe_mode,
         endpoint_ids=endpoint_ids or [],
