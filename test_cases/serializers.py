@@ -76,7 +76,7 @@ class SessionHistorySerializer(serializers.ModelSerializer):
         fields = [
             'id', 'batch_id', 'status', 'mission_type', 'user_story',
             'collection_name', 'project_name',
-            'total_steps', 'passed_steps', 'failed_steps',
+            'total_steps', 'passed_steps', 'failed_steps', 'steps_count',
             'pass_rate', 'duration_seconds', 'completed_at',
             'summary', 'error_message',
             'created_at',
