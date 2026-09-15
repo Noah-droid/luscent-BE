@@ -1836,7 +1836,7 @@ INSTRUCTIONS:
    - For OTP/VERIFICATION FLOW: MAIL_ACTION 'create' BEFORE signup → use the returned email in signup payload → MAIL_ACTION 'get_messages' to get OTP → verify.
 3. COMPLIANCE CHECKLIST: Before every move, mentally check off which scenarios from {self.scenarios} you have already verified. Do not finish until you have diverse coverage for ALL of them.
 4. SCHEMA OBSESSION: Before calling any API, check its 'request_body' field in the AVAILABLE API ENDPOINTS list. Match its keys and casing EXACTLY. Also check 'auth_type' and 'headers' per endpoint.
-   - CRITICAL: NEVER copy encrypted, encoded, or hashed values from the request_body schema. Those are stored examples, not real data. Generate FRESH, PLAIN-TEXT test data for every field. For example: use a real date like "1990-05-15" for dob, a numeric string like "12345678901" for nin, "testuser_123@example.com" for email (or the AGENT_EMAIL if available), etc.
+   - CRITICAL: NEVER copy encrypted, encoded, or hashed values from the request_body schema. Those are stored examples, not real data. Generate FRESH, PLAIN-TEXT test data for every field. For example: use a real date like "1990-05-15" for dob, a numeric string like "12345678901" for nin, "user" for role, "testuser_123@example.com" for email (or the AGENT_EMAIL if available), etc. If a field value looks like "gAAAAAB..." or starts with random long strings, it is encrypted — generate a fresh plain-text value instead.
 5. ADAPT: If an API call fails (4xx/5xx), ANALYZE THE ERROR BODY for the correct keys. If the server says "FirstName is required", look at your casing! Use the exact keys the server's error message suggests.
 {"6. UI EXPLORATION: If 'AVAILABLE API ENDPOINTS' is empty but you have a 'BASE URL', start by using BROWSER_ACTION 'navigate' to the BASE URL to discover the application." if has_browser else ""}
 7. SAFE MODE GUARDRAILS: {"ENABLED" if self.is_safe_mode else "DISABLED"}
@@ -1855,6 +1855,7 @@ Type A: CALL_API
   "reason": "Explain why this step matters for the story",
   "payload": {{ "headers": {{...}}, "body": {{...}}, "params": {{...}} }}
 }}
+⚠️ In the payload.body: NEVER use encrypted/hashed/encoded strings from the schema examples. If a field shows something like "gAAAAAB..." or base64, REPLACE it with fresh plain text (e.g., "user" for role, "1990-05-15" for dob, "12345678901" for nin).
 
 Type B: BROWSER_ACTION
 {{
