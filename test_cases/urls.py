@@ -6,7 +6,7 @@ from .views import (
     TestConfigView, RefineTestDraftView,
     TriggerTestRunView, ProjectStatusView, ProjectRunReportsView, ProjectAutoPilotView, ProjectSecurityAuditView,
     CollectionAutoPilotView, CollectionStatusView,
-    AgentMissionListView, AgentMissionDetailView, AgentMissionPromptView,
+    AgentMissionListView, AgentMissionDetailView, AgentMissionSSEView, AgentMissionPromptView,
     SessionReportView, SessionHistoryView, SessionComparisonView,
     DashboardSummaryView, BatchReportView,
     AgentTakeoverView, DatasetExportView, MissionRerunView
@@ -34,6 +34,7 @@ urlpatterns = [
     # Agent Live Interaction
     path("missions/", AgentMissionListView.as_view(), name="agent-mission-list"),
     path("missions/<uuid:batch_id>/", AgentMissionDetailView.as_view(), name="agent-mission-detail"),
+    path("missions/<uuid:batch_id>/stream/", AgentMissionSSEView.as_view(), name="agent-mission-stream"),
     path("missions/<uuid:batch_id>/prompt/", AgentMissionPromptView.as_view(), name="agent-mission-prompt"),
     
     # Session Reports

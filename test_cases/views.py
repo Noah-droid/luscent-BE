@@ -1269,6 +1269,71 @@ class AgentMissionDetailView(generics.RetrieveAPIView):
              return get_object_or_404(AgentMission, batch_id=batch_id, user=self.request.user)
         return super().get_object()
 
+
+class AgentMissionSSEView(APIView):
+    """
+    Server-Sent Events endpoint for real-time mission streaming.
+    GET /test-cases/missions/<batch_id>/stream/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, batch_id):
+        from django.http import StreamingHttpResponse
+        import json, time
+
+        mission = get_object_or_404(AgentMission, batch_id=batch_id, user=request.user)
+
+        def event_stream():
+            last_step_count = 0
+            last_status = None
+            poll_interval = 0.5
+
+            while True:
+                # Re-fetch mission from DB (avoid stale cache)
+                try:
+                    m = AgentMission.objects.get(id=mission.id)
+                except AgentMission.DoesNotExist:
+                    break
+
+                current_status = m.status
+                current_steps = list(
+                    m.steps.order_by('created_at').values(
+                        'id', 'action', 'status', 'url', 'method',
+                        'reason', 'response_status', 'response_body',
+                        'duration_ms', 'created_at'
+                    )
+                )
+                current_count = len(current_steps)
+
+                # Send mission status change
+                if current_status != last_status:
+                    yield f"event: status\ndata: {json.dumps({'status': current_status, 'total_steps': m.total_steps, 'passed_steps': m.passed_steps, 'failed_steps': m.failed_steps, 'duration_seconds': m.duration_seconds, 'error_message': m.error_message, 'summary': m.summary})}\n\n"
+                    last_status = current_status
+
+                # Send new steps
+                if current_count > last_step_count:
+                    new_steps = current_steps[last_step_count:]
+                    for step in new_steps:
+                        step['created_at'] = step['created_at'].isoformat() if step['created_at'] else None
+                        step['response_body'] = str(step['response_body'])[:500] if step['response_body'] else None
+                        yield f"event: step\ndata: {json.dumps(step)}\n\n"
+                    last_step_count = current_count
+
+                # Send keepalive
+                yield f"event: ping\ndata: {json.dumps({'time': time.time()})}\n\n"
+
+                # If mission is done, send final event and close
+                if current_status in ('completed', 'error'):
+                    yield f"event: done\ndata: {json.dumps({'status': current_status})}\n\n"
+                    break
+
+                time.sleep(poll_interval)
+
+        response = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
+        response['Cache-Control'] = 'no-cache'
+        response['X-Accel-Buffering'] = 'no'  # Disable nginx buffering
+        return response
+
 class AgentMissionPromptView(APIView):
     """
     Allows user to send a guidance prompt to a running mission.
