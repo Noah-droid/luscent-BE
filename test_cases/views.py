@@ -849,7 +849,7 @@ class ProjectAutoPilotView(APIView):
 
         # Detect Safe Mode: True if any endpoint starts with a production URL or if explicitly requested
         is_safe_mode = request.data.get("is_safe_mode", True)
-        load_config = request.data.get("load_config", {})
+        load_config = request.data.get("load_config") or {}
         
         mission = AgentMission.objects.create(
             user=request.user,
@@ -1032,7 +1032,7 @@ class CollectionAutoPilotView(APIView):
         # Persist browser config so the worker can pick it up
         browser_config = request.data.get("browser_config", {})
         is_safe_mode = request.data.get("is_safe_mode", True)
-        load_config = request.data.get("load_config", {})
+        load_config = request.data.get("load_config") or {}
 
         mission = AgentMission.objects.create(
             user=request.user,
