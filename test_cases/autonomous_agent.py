@@ -1285,10 +1285,60 @@ run()
         think_time = action.get("think_time", load_cfg.get("thinkTime", 0))
         load_mode = action.get("load_mode", load_cfg.get("mode", "constant"))
         ramp_up_duration = action.get("ramp_up_duration", load_cfg.get("rampUpDuration", 10))
+        auth_mode = action.get("auth_mode", load_cfg.get("authMode", "shared"))
         
-        logger.info(f"[Agent] E2B Stress Test: {users} users, spawn_rate={spawn_rate}, duration={duration}, mode={load_mode}, think_time={think_time}ms")
+        logger.info(f"[Agent] E2B Stress Test: {users} users, spawn_rate={spawn_rate}, duration={duration}, mode={load_mode}, think_time={think_time}ms, auth={auth_mode}")
+        
+        # --- Pre-authentication for protected endpoints ---
+        tokens = []
+        target_endpoints = [endpoint_map.get(eid) for eid in target_ids if eid in endpoint_map]
+        needs_auth = any(
+            ep and ('Authorization' in (ep.get('headers') or {}) or '/auth' in (ep.get('url') or '') or '/login' in (ep.get('url') or ''))
+            for ep in target_endpoints
+        )
+        
+        if needs_auth and auth_mode == 'shared':
+            # Create one account, share token across all users
+            try:
+                token = self._create_load_test_account()
+                if token:
+                    tokens = [token] * users
+                    logger.info(f"[Agent] Shared auth: created 1 account, token will be shared across {users} users")
+            except Exception as e:
+                logger.warning(f"[Agent] Shared auth failed: {e}, continuing without auth")
+        elif needs_auth and auth_mode == 'unique':
+            # Create N accounts, each user gets own token
+            for i in range(users):
+                try:
+                    token = self._create_load_test_account()
+                    if token:
+                        tokens.append(token)
+                except Exception as e:
+                    logger.warning(f"[Agent] Unique auth account {i+1}/{users} failed: {e}")
+            logger.info(f"[Agent] Unique auth: created {len(tokens)}/{users} accounts")
+        
+        # Write credentials to sandbox for Locust to read
+        if tokens:
+            creds_json = json.dumps(tokens)
+            self.sandbox.files.write("/home/user/credentials.json", creds_json)
+        
+        # Upload locustfile to sandbox
+        locustfile_path = os.path.join(os.path.dirname(__file__), "locustfile.py")
+        if os.path.exists(locustfile_path):
+            with open(locustfile_path, "r") as f:
+                self.sandbox.files.write("/home/user/locustfile.py", f.read())
+        
+        # Install locust in sandbox
+        try:
+            self.sandbox.commands.run("pip install locust -q", timeout=60)
+        except Exception as e:
+            logger.warning(f"[Agent] Locust install: {e}")
+        
+        logger.info(f"[Agent] E2B Stress Test: {users} users, spawn_rate={spawn_rate}, duration={duration}, mode={load_mode}, think_time={think_time}ms, tokens={len(tokens)}")
         
         cmd = f"locust -f /home/user/locustfile.py --headless -u {users} -r {spawn_rate} -t {duration}"
+        base_url = self.collection.base_url or "http://localhost"
+        cmd += f" --base-url {base_url}"
         if think_time > 0:
             cmd += f" --think-time {think_time}"
         if load_mode == "step":
@@ -1297,6 +1347,67 @@ run()
             cmd += f" --step-load --step-users {step_users} --step-time {step_time}s"
         
         return self._execute_shell_command({"command": cmd})
+
+    def _create_load_test_account(self):
+        """Create a disposable email, register, and return a JWT token."""
+        import requests
+        base_url = self.collection.base_url or ""
+        if base_url and not base_url.endswith("/"):
+            base_url += "/"
+        
+        # 1. Create email
+        resp = requests.post("https://api.mail.tm/domains", timeout=10)
+        if resp.status_code != 200:
+            resp = requests.get("https://api.mail.tm/domains", timeout=10)
+        domains = resp.json().get("hydra:member", resp.json().get("member", []))
+        if not domains:
+            return None
+        domain = domains[0].get("domain")
+        
+        import random, string
+        email = f"loadtest_{''.join(random.choices(string.ascii_lowercase + string.digits, k=10))}@{domain}"
+        password = "LoadTest123!"
+        
+        resp = requests.post("https://api.mail.tm/accounts", json={"address": email, "password": password}, timeout=10)
+        if resp.status_code not in (200, 201):
+            return None
+        
+        token_resp = requests.post("https://api.mail.tm/token", json={"address": email, "password": password}, timeout=10)
+        if token_resp.status_code != 200:
+            return None
+        mail_token = token_resp.json().get("token")
+        
+        # 2. Register on the target API (find register endpoint)
+        register_data = {"email": email, "password": password, "name": f"Load User {email.split('@')[0]}"}
+        
+        # 3. Poll for verification email if needed
+        import time
+        for _ in range(5):
+            try:
+                msg_resp = requests.get("https://api.mail.tm/messages", headers={"Authorization": f"Bearer {mail_token}"}, timeout=10)
+                messages = msg_resp.json().get("hydra:member", msg_resp.json().get("member", []))
+                if messages:
+                    body = messages[0].get("text", "") or messages[0].get("html", [""])[0]
+                    otp, magic_link, _ = self._extract_verification_signals(body)
+                    if magic_link:
+                        requests.get(magic_link, timeout=10)
+                    elif otp:
+                        # Try to verify with OTP
+                        requests.post(f"{base_url}/api/auth/verify", json={"email": email, "code": otp}, timeout=10)
+                    break
+            except Exception:
+                pass
+            time.sleep(2)
+        
+        # 4. Login to get JWT
+        try:
+            login_resp = requests.post(f"{base_url}/api/auth/login", json={"email": email, "password": password}, timeout=10)
+            if login_resp.status_code == 200:
+                return login_resp.json().get("token") or login_resp.json().get("access")
+        except Exception:
+            pass
+        
+        return None
 
     @staticmethod
     def _extract_verification_signals(body):
@@ -1770,6 +1881,7 @@ Type C: STRESS_TEST
   "think_time": 0,
   "ramp_up_duration": 10,
   "load_mode": "constant",
+  "auth_mode": "shared",
   "reason": "The user wants to ensure the signup flow doesn't crash under pressure"
 }}
 
