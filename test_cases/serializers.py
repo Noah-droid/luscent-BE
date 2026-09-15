@@ -69,7 +69,7 @@ class SessionHistorySerializer(serializers.ModelSerializer):
     collection_name = serializers.ReadOnlyField(source='collection.name')
     project_name = serializers.ReadOnlyField(source='collection.project.name')
     steps_count = serializers.SerializerMethodField()
-    pass_rate = serializers.FloatField(read_only=True)
+    pass_rate = serializers.SerializerMethodField()
 
     class Meta:
         model = AgentMission
@@ -84,6 +84,12 @@ class SessionHistorySerializer(serializers.ModelSerializer):
 
     def get_steps_count(self, obj):
         return obj.total_steps or obj.steps.count()
+
+    def get_pass_rate(self, obj):
+        total = obj.total_steps or obj.steps.count() or 0
+        if total == 0:
+            return 0.0
+        return round((obj.passed_steps or 0) / total * 100, 1)
 
 
 class AgentMissionSerializer(serializers.ModelSerializer):
